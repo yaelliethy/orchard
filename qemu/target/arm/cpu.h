@@ -142,14 +142,6 @@ typedef struct ARMGenericTimer {
 } ARMGenericTimer;
 
 /* In AArch32 mode, PAC keys do not exist at all.  */
-/* Apple APCTL_EL1 (s3_4_c15_c0_4), as the vmapple kernel programs it. */
-#define APCTL_AppleMode         (1ULL << 0)
-#define APCTL_MKEYVld           (1ULL << 1)
-#define APCTL_KernKeyEn         (1ULL << 2)
-
-/* Apple APCFG_EL1 (s3_4_c15_c0_6). */
-#define APCFG_EL1_ELXENKEY      (1ULL << 1)
-
 typedef struct ARMPACKey {
     uint64_t lo, hi;
 } ARMPACKey;
@@ -584,9 +576,6 @@ typedef struct CPUArchState {
         uint64_t mecid_rl_a_el3;
         uint64_t vmecid_p_el2;
         uint64_t vmecid_a_el2;
-        /* Apple-specific: APCTL_EL1, the PAC mode/key-valid control. */
-        uint64_t apctl_el1;
-        uint64_t apcfg_el1;
     } cp15;
 
     struct {
@@ -730,18 +719,6 @@ typedef struct CPUArchState {
         ARMPACKey apda;
         ARMPACKey apdb;
         ARMPACKey apga;
-        /*
-         * Apple's machine-wide kernel key. `pauth_computepac` mixes it into
-         * every EL1 signature while APCTL_KernKeyEn is set, so it is the half
-         * of the PAC state a core leaving reset cannot program for itself.
-         */
-        ARMPACKey kernel;
-        /*
-         * Apple's boot diversifier: key writes are XORed with it while
-         * APCTL_AppleMode is set, so the value the guest programs is not the
-         * value the hash sees.
-         */
-        ARMPACKey m;
     } keys;
 
     uint64_t scxtnum_el[4];
@@ -1193,13 +1170,6 @@ struct ArchCPU {
 
     /* Generic timer counter frequency, in Hz */
     uint64_t gt_cntfrq_hz;
-
-    /*
-     * Apple PAC boot diversifier. The machine hands every core the same value;
-     * key writes are XORed with it while APCTL_AppleMode is set.
-     */
-    uint64_t m_key_lo;
-    uint64_t m_key_hi;
 };
 
 typedef struct ARMCPUInfo {

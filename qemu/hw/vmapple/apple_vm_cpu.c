@@ -6,9 +6,8 @@
  * and — unlike apple-a13/apple-m2 — realizes without any SoC-specific AIC2 /
  * fiq-or wiring, so it drops straight into a GICv3-based virtual machine.
  *
- * This class exists so that Apple-VM hardware quirks (e.g. delivering the
- * architected timer on FIQ the way XNU expects, or shimming IMPDEF system
- * registers) can be added here rather than in the shared ARM core.
+ * Its one setting is real PAC under TCG; everything else vmapple needs from
+ * the CPU is architected (see hw/vmapple/hvc.c).
  *
  * Copyright (c) 2026 Youssef Elliethy (yaelliethy)
  *
@@ -23,49 +22,22 @@
 
 static void apple_vm_cpu_initfn(Object *obj)
 {
-    /*
-     * The parent (`max`) instance_init has already enabled the full feature
-     * set. Apple-VM-specific instance tweaks go here.
-     */
     if (tcg_enabled()) {
         /*
-         * PAC is a no-op by default: cheap under TCG, and the kernelcache we
-         * boot via -kernel is ChefKiss-patched so its JOP checks never run.
-         * A stock kernel (the AVPBooter path loads one off the disk) does run
-         * them and dies with "JOP Hash Mismatch Detected (PC, CPSR, or LR
-         * corruption)", because no-op signing cannot satisfy a real verify.
-         * ORCHARD_REAL_PAUTH=1 selects QEMU's actual PAC implementation.
+         * The stock kernel verifies its own signed pointers ("JOP Hash
+         * Mismatch Detected" under pauth-noop), so PAC has to be real. The
+         * implementation-defined hash rather than architected QARMA5: both
+         * are self-consistent, so the guest cannot tell them apart by signing
+         * and authenticating, and this one is faster.
          */
-        const char *real = getenv("ORCHARD_REAL_PAUTH");
-
-        if (real == NULL || g_strcmp0(real, "1") != 0) {
-            object_property_set_bool(obj, "pauth-noop", true, NULL);
-        } else {
-            /*
-             * The cheap implementation-defined hash, not architected QARMA5:
-             * both are self-consistent, so a guest cannot tell them apart by
-             * signing and authenticating alone, and this one is faster.
-             */
-            object_property_set_bool(obj, "pauth-noop", false, NULL);
-            object_property_set_bool(obj, "pauth-impdef", true, NULL);
-        }
+        object_property_set_bool(obj, "pauth-impdef", true, NULL);
     }
-}
-
-static void apple_vm_cpu_class_init(ObjectClass *oc, const void *data)
-{
-    /*
-     * The parent (`max`) class_init has already installed reset/realize.
-     * Apple-VM-specific class overrides (realize wrapper, timer routing) go
-     * here.
-     */
 }
 
 static const TypeInfo apple_vm_cpu_type_info = {
     .name = TYPE_APPLE_VM_CPU,
     .parent = ARM_CPU_TYPE_NAME("max"),
     .instance_init = apple_vm_cpu_initfn,
-    .class_init = apple_vm_cpu_class_init,
 };
 
 static void apple_vm_cpu_register_types(void)

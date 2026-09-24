@@ -2022,9 +2022,6 @@ void cpsr_write_from_spsr_elx(CPUARMState *env, uint32_t val);
 /* Compare uint64_t for qsort and bsearch. */
 int compare_u64(const void *a, const void *b);
 
-/* Reinstall Apple's PAC key state after a core reset; defined in helper.c. */
-void arm_apple_pac_reset(CPUARMState *env);
-
 /* Used in FEAT_MEC to set the MECIDWidthm1 field in the MECIDR_EL2 register. */
 #define MECID_WIDTH 16
 

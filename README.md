@@ -87,9 +87,7 @@ considerably faster.
 ## Licensing and what is not distributed
 
 The QEMU changes are GPL-2.0-or-later, like QEMU itself. `reims-vgpu/` is
-[steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu), LGPL-3.0. Parts of the Apple PAC
-support in `target/arm` are derived from the [Inferno](https://github.com/ChefKissInc/Inferno)
-fork of QEMU (ChefKissInc, GPL-2.0-or-later); `TECHNICAL.md` says which.
+[steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu), LGPL-3.0.
 
 The AVPBooter patch applied by `scripts/patch-avpbooter.py` is from NyanSatan's
 [Virtual-iBoot-Fun](https://github.com/NyanSatan/Virtual-iBoot-Fun).

@@ -26,6 +26,7 @@
 #include "arm-powerctl.h"
 #include "target/arm/multiprocessing.h"
 #include "target/arm/trace.h"
+#include "target/arm/smccc.h"
 
 bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
 {
@@ -82,6 +83,11 @@ void arm_handle_psci_call(ARMCPU *cpu)
     }
     trace_arm_psci_call(param[0], param[1], param[2], param[3],
                         arm_cpu_mp_affinity(cpu));
+
+    /* A board's vendor hypercalls share the PSCI conduit; offer them first. */
+    if (is_a64(env) && arm_smccc_dispatch(cpu)) {
+        return;
+    }
 
     if ((param[0] & QEMU_PSCI_0_2_64BIT) && !is_a64(env)) {
         ret = QEMU_PSCI_RET_NOT_SUPPORTED;

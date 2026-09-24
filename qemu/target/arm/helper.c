@@ -5385,206 +5385,57 @@ static CPAccessResult access_pauth(CPUARMState *env, const ARMCPRegInfo *ri,
     return CP_ACCESS_OK;
 }
 
-/*
- * What each core last programmed, so a reset can put it back.
- *
- * A core leaving PSCI CPU_ON has zeroed key registers, but on real hardware it
- * comes up through firmware that has already restored them -- and a core cycled
- * off and on for idle must come back with *its own* keys, not another core's,
- * because APIA/APIB/APDA/APDB are the per-process keys the kernel rewrites on
- * every context switch.
- */
-#define ARM_PAC_SNAPSHOT_CPUS 64
-
-static struct {
-    bool valid;
-    ARMPACKey apia, apib, apda, apdb, apga, kernel;
-    uint64_t apctl;
-} arm_pac_snapshot[ARM_PAC_SNAPSHOT_CPUS];
-
-static void arm_pac_snapshot_take(CPUARMState *env)
-{
-    unsigned idx = env_cpu(env)->cpu_index;
-
-    if (idx >= ARM_PAC_SNAPSHOT_CPUS) {
-        return;
-    }
-    arm_pac_snapshot[idx].apia = env->keys.apia;
-    arm_pac_snapshot[idx].apib = env->keys.apib;
-    arm_pac_snapshot[idx].apda = env->keys.apda;
-    arm_pac_snapshot[idx].apdb = env->keys.apdb;
-    arm_pac_snapshot[idx].apga = env->keys.apga;
-    arm_pac_snapshot[idx].kernel = env->keys.kernel;
-    arm_pac_snapshot[idx].apctl = env->cp15.apctl_el1;
-    arm_pac_snapshot[idx].valid = true;
-}
-
-/*
- * Give a core coming out of reset the PAC key state firmware would have left it.
- *
- * Measured on a vmapple macOS guest: the boot CPU programs APIA/APIB/APDA/APDB/
- * APGA once, with APCTL_MKEYVld set, and no secondary ever writes a key
- * register. On real hardware a core leaves reset through a firmware stub that
- * has already set this up; QEMU's PSCI CPU_ON jumps straight to the kernel, so
- * secondaries came up with zero keys -- and every pointer the boot CPU signed
- * then failed to authenticate the moment another core touched it. That is an
- * FPAC fault whose own panic path re-faults, recursing until the kernel stack
- * is gone and taking every core with it. With this on, a measured boot goes
- * from 19 authentication failures to none.
- *
- * Keys only: APIA/APIB/APDA/APDB are also the per-process keys the kernel
- * reprograms on every context switch, so they must stay per-core once a core is
- * running, and APCTL is left as reset made it because the kernel reads it
- * during its own bring-up.
- *
- * ORCHARD_PAC_INHERIT=1 selects it.
- */
-void arm_apple_pac_reset(CPUARMState *env)
-{
-    const char *on = getenv("ORCHARD_PAC_INHERIT");
-    unsigned idx, from;
-    CPUState *boot;
-    CPUARMState *src;
-
-    if (on == NULL || *on != '1') {
-        return;
-    }
-    boot = qemu_get_cpu(0);
-    if (boot == NULL || &ARM_CPU(boot)->env == env) {
-        return;
-    }
-    src = &ARM_CPU(boot)->env;
-    if (!(src->cp15.apctl_el1 & (APCTL_MKEYVld | APCTL_KernKeyEn))) {
-        return;
-    }
-    idx = env_cpu(env)->cpu_index;
-    from = (idx < ARM_PAC_SNAPSHOT_CPUS && arm_pac_snapshot[idx].valid) ? idx : 0;
-    if (!arm_pac_snapshot[from].valid) {
-        return;
-    }
-    env->keys.apia = arm_pac_snapshot[from].apia;
-    env->keys.apib = arm_pac_snapshot[from].apib;
-    env->keys.apda = arm_pac_snapshot[from].apda;
-    env->keys.apdb = arm_pac_snapshot[from].apdb;
-    env->keys.apga = arm_pac_snapshot[from].apga;
-}
-
-static void pauth_write_lo(CPUARMState *env, const ARMCPRegInfo *ri,
-                           uint64_t value)
-{
-    assert(ri->fieldoffset);
-    if (env->cp15.apctl_el1 & APCTL_AppleMode) {
-        value ^= env->keys.m.lo;
-    }
-    raw_write(env, ri, value);
-    arm_pac_snapshot_take(env);
-}
-
-static void pauth_write_hi(CPUARMState *env, const ARMCPRegInfo *ri,
-                           uint64_t value)
-{
-    assert(ri->fieldoffset);
-    if (env->cp15.apctl_el1 & APCTL_AppleMode) {
-        value ^= env->keys.m.hi;
-    }
-    raw_write(env, ri, value);
-    arm_pac_snapshot_take(env);
-}
-
-static void apctl_write(CPUARMState *env, const ARMCPRegInfo *ri,
-                        uint64_t value)
-{
-    assert(ri->fieldoffset);
-    /* MKEYVld is write-once: the guest cannot clear it once firmware set it. */
-    value &= ~APCTL_MKEYVld;
-    value |= raw_read(env, ri) & APCTL_MKEYVld;
-    raw_write(env, ri, value);
-}
-
 static const ARMCPRegInfo pauth_reginfo[] = {
     { .name = "APDAKEYLO_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 2, .opc2 = 0,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_lo, .raw_writefn = raw_write,
       .fgt = FGT_APDAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apda.lo) },
     { .name = "APDAKEYHI_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 2, .opc2 = 1,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_hi, .raw_writefn = raw_write,
       .fgt = FGT_APDAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apda.hi) },
     { .name = "APDBKEYLO_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 2, .opc2 = 2,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_lo, .raw_writefn = raw_write,
       .fgt = FGT_APDBKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apdb.lo) },
     { .name = "APDBKEYHI_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 2, .opc2 = 3,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_hi, .raw_writefn = raw_write,
       .fgt = FGT_APDBKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apdb.hi) },
     { .name = "APGAKEYLO_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 3, .opc2 = 0,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_lo, .raw_writefn = raw_write,
       .fgt = FGT_APGAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apga.lo) },
     { .name = "APGAKEYHI_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 3, .opc2 = 1,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_hi, .raw_writefn = raw_write,
       .fgt = FGT_APGAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apga.hi) },
     { .name = "APIAKEYLO_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 1, .opc2 = 0,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_lo, .raw_writefn = raw_write,
       .fgt = FGT_APIAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apia.lo) },
     { .name = "APIAKEYHI_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 1, .opc2 = 1,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_hi, .raw_writefn = raw_write,
       .fgt = FGT_APIAKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apia.hi) },
     { .name = "APIBKEYLO_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 1, .opc2 = 2,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_lo, .raw_writefn = raw_write,
       .fgt = FGT_APIBKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apib.lo) },
     { .name = "APIBKEYHI_EL1", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 0, .crn = 2, .crm = 1, .opc2 = 3,
       .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = pauth_write_hi, .raw_writefn = raw_write,
       .fgt = FGT_APIBKEY,
       .fieldoffset = offsetof(CPUARMState, keys.apib.hi) },
-    /*
-     * Apple's own PAC registers: the machine-wide kernel key, the PAC mode
-     * control and its configuration. The vmapple kernel programs all three.
-     */
-    { .name = "KERNELKEYLO_EL1", .state = ARM_CP_STATE_AA64,
-      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 1, .opc2 = 0,
-      .access = PL1_RW, .accessfn = access_pauth,
-      .fieldoffset = offsetof(CPUARMState, keys.kernel.lo) },
-    { .name = "KERNELKEYHI_EL1", .state = ARM_CP_STATE_AA64,
-      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 1, .opc2 = 1,
-      .access = PL1_RW, .accessfn = access_pauth,
-      .fieldoffset = offsetof(CPUARMState, keys.kernel.hi) },
-    { .name = "APCTL_EL1", .state = ARM_CP_STATE_AA64,
-      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 4,
-      .access = PL1_RW, .accessfn = access_pauth,
-      .writefn = apctl_write, .raw_writefn = raw_write,
-      .resetvalue = APCTL_MKEYVld,
-      .fieldoffset = offsetof(CPUARMState, cp15.apctl_el1) },
-    { .name = "APCFG_EL1", .state = ARM_CP_STATE_AA64,
-      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 6,
-      .access = PL1_RW, .accessfn = access_pauth,
-      .resetvalue = APCFG_EL1_ELXENKEY,
-      .fieldoffset = offsetof(CPUARMState, cp15.apcfg_el1) },
 };
 
 static CPAccessResult access_rndr(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -8232,16 +8083,8 @@ void define_one_arm_cp_reg(ARMCPU *cpu, const ARMCPRegInfo *r)
             break;
         case 4:
         case 5:
-            /*
-             * min_EL EL2 architecturally.
-             *
-             * Apple does not follow that rule in its IMPDEF space: the vmapple
-             * kernel programs KERNELKEY*_EL1 and APCTL_EL1 (s3_4_c15_*) from
-             * EL1, and the architectural mask would make every one of those
-             * accesses trap. Relaxed to EL1 rather than to EL0, so a register
-             * at this op1 still cannot be reached from userspace.
-             */
-            mask = PL1_RW;
+            /* min_EL EL2 */
+            mask = PL2_RW;
             break;
         case 6:
             /* min_EL EL3 */

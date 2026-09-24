@@ -37,6 +37,8 @@
 #include "whpx_arm.h"
 #include "hw/arm/bsa.h"
 #include "arm-powerctl.h"
+#include "smccc.h"
+#include "emulate-ldst.h"
 
 #include <winhvplatform.h>
 #include <winhvplatformdefs.h>
@@ -350,6 +352,33 @@ static void whpx_set_gp_reg(CPUState *cpu, int rt, uint64_t val)
     whpx_set_reg(cpu, reg, reg_val);
 }
 
+static bool whpx_ldst_access(uint64_t pa, uint64_t *val, unsigned size,
+                             bool is_write)
+{
+    return address_space_rw(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                            val, size, is_write) == MEMTX_OK;
+}
+
+/*
+ * A data abort with ISV=0 (writeback or pair) carries no register or size.
+ * Decode and emulate the instruction instead; the run loop then steps the PC
+ * past it, to the same address arm_emulate_ldst() leaves in env.
+ */
+static int whpx_handle_mmio_nisv(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
+{
+    CPUARMState *env = &ARM_CPU(cpu)->env;
+    uint32_t insn;
+
+    cpu_synchronize_state(cpu);
+    if (cpu_memory_rw_debug(cpu, env->pc, &insn, sizeof(insn), false) ||
+        !arm_emulate_ldst(env, insn, ctx->Gpa, whpx_ldst_access)) {
+        error_report("WHPX: cannot emulate no-syndrome access: pc=0x%" PRIx64
+                     " gpa=0x%" PRIx64, env->pc, (uint64_t)ctx->Gpa);
+        return -1;
+    }
+    return 0;
+}
+
 static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
 {
     uint64_t syndrome = ctx->Syndrome;
@@ -365,7 +394,9 @@ static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
 
     assert(syn_get_ec(syndrome) == EC_DATAABORT);
     assert(!cm);
-    assert(isv);
+    if (!isv) {
+        return whpx_handle_mmio_nisv(cpu, ctx);
+    }
 
     if (iswrite) {
         val = whpx_get_gp_reg(cpu, srt);
@@ -383,6 +414,35 @@ static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
     }
 
     return 0;
+}
+
+uint64_t whpx_arm_gic_addr(const char *prop, uint64_t virt_default)
+{
+    Object *machine = OBJECT(current_machine);
+
+    if (!object_property_find(machine, prop)) {
+        return virt_default;
+    }
+    return object_property_get_uint(machine, prop, &error_abort);
+}
+
+/*
+ * A guest SMCCC call the hypervisor does not implement (enabled by
+ * HypercallExit). The board handler registered with arm_smccc_set_handler()
+ * serves it; anything else answers NOT_SUPPORTED.
+ *
+ * The exit leaves the PC at the HVC, as for memory-access exits, so it is
+ * stepped past here (OpenVMM's and VirtualBox's WHP backends do the same).
+ */
+static void whpx_handle_hypercall(CPUState *cpu)
+{
+    ARMCPU *arm_cpu = ARM_CPU(cpu);
+
+    cpu_synchronize_state(cpu);
+    if (!arm_smccc_dispatch(arm_cpu)) {
+        arm_cpu->env.xregs[0] = QEMU_PSCI_RET_NOT_SUPPORTED;
+    }
+    arm_cpu->env.pc += 4;
 }
 
 static void whpx_psci_cpu_off(ARMCPU *arm_cpu)
@@ -455,6 +515,11 @@ int whpx_vcpu_run(CPUState *cpu)
         case WHvRunVpExitReasonCanceled:
             cpu->exception_index = EXCP_INTERRUPT;
             ret = 1;
+            break;
+        case WHvRunVpExitReasonHypercall:
+            bql_lock();
+            whpx_handle_hypercall(cpu);
+            bql_unlock();
             break;
         case WHvRunVpExitReasonArm64Reset:
             switch (vcpu->exit_ctx.Arm64Reset.ResetType) {
@@ -946,8 +1011,8 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
 
     /*
      * The only currently supported configuration for the interrupt
-     * controller is kernel-irqchip=on,gic-version=3, with the `virt`
-     * machine.
+     * controller is kernel-irqchip=on,gic-version=3, at the `virt` machine's
+     * addresses unless the board publishes its own (see whpx_arm_gic_addr).
      *
      * Initialising the vGIC here because it needs to be done prior to
      * WHvSetupPartition.
@@ -956,8 +1021,9 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
     WHV_ARM64_IC_PARAMETERS ic_params = {
         .EmulationMode = WHvArm64IcEmulationModeGicV3,
         .GicV3Parameters = {
-            .GicdBaseAddress = 0x08000000,
-            .GitsTranslaterBaseAddress = 0x08080000,
+            .GicdBaseAddress = whpx_arm_gic_addr("gic-dist-base", 0x08000000),
+            .GitsTranslaterBaseAddress =
+                whpx_arm_gic_addr("gic-its-base", 0x08080000),
             .GicLpiIntIdBits = 0,
             .GicPpiPerformanceMonitorsInterrupt = VIRTUAL_PMU_IRQ,
             .GicPpiOverflowInterruptFromCntv = ARCH_TIMER_VIRT_IRQ
@@ -974,6 +1040,28 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
         error_report("WHPX: Failed to enable GICv3 interrupt controller, hr=%08lx", hr);
         ret = -EINVAL;
         goto error;
+    }
+
+    /*
+     * Hand SMCCC calls the hypervisor does not implement to QEMU, where a
+     * board's vendor hypercalls are served (see whpx_handle_hypercall).
+     */
+    memset(&whpx_cap, 0, sizeof(whpx_cap));
+    hr = whp_dispatch.WHvGetCapability(
+        WHvCapabilityCodeExtendedVmExits, &whpx_cap, sizeof(whpx_cap), NULL);
+    if (SUCCEEDED(hr) && whpx_cap.ExtendedVmExits.HypercallExit) {
+        memset(&prop, 0, sizeof(prop));
+        prop.ExtendedVmExits.HypercallExit = 1;
+        hr = whp_dispatch.WHvSetPartitionProperty(
+                whpx->partition,
+                WHvPartitionPropertyCodeExtendedVmExits,
+                &prop,
+                sizeof(prop));
+        if (FAILED(hr)) {
+            error_report("WHPX: Failed to enable hypercall exits, hr=%08lx", hr);
+            ret = -EINVAL;
+            goto error;
+        }
     }
 
     /* Enable synthetic processor features */

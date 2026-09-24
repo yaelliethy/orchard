@@ -43,6 +43,8 @@
 #include "hw/acpi/ghes.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
+#include "target/arm/smccc.h"
+#include "target/arm/emulate-ldst.h"
 
 const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_INFO(DEVICE_CTRL),
@@ -1438,6 +1440,33 @@ static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
  *
  * Returns: 0 if the exception has been handled, < 0 otherwise
  */
+/* An access arm_emulate_ldst() decoded: the in-kernel vGIC, else QEMU. */
+static bool kvm_arm_ldst_access(uint64_t pa, uint64_t *val, unsigned size,
+                                bool is_write)
+{
+    if (kvm_arm_gicv3_mmio(pa, val, size, is_write)) {
+        return true;
+    }
+    return address_space_rw(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                            val, size, is_write) == MEMTX_OK;
+}
+
+/*
+ * Emulate the load/store KVM could not decode. xnu's pe_init_fiq() writes
+ * GICR_IGROUPR0 with a pre-indexed store (str w9, [x8, #0x80]!) on every
+ * core, and without this the guest takes an external abort there.
+ */
+static bool kvm_arm_emulate_nisv(ARMCPU *cpu, uint32_t insn,
+                                 uint64_t fault_ipa)
+{
+    bool done;
+
+    bql_lock();
+    done = arm_emulate_ldst(&cpu->env, insn, fault_ipa, kvm_arm_ldst_access);
+    bql_unlock();
+    return done;
+}
+
 static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
                                     uint64_t fault_ipa)
 {
@@ -1445,14 +1474,19 @@ static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
     static uint64_t last_pc = -1;
     uint32_t insn = 0;
 
-    /*
-     * Name the instruction KVM could not decode: without it the guest only
-     * sees an external abort and the cause is lost.
-     */
     cpu_synchronize_state(CPU(cpu));
+    if (cpu_memory_rw_debug(CPU(cpu), env->pc, &insn, sizeof(insn),
+                            false) == 0 &&
+        kvm_arm_emulate_nisv(cpu, insn, fault_ipa)) {
+        return 0;
+    }
+
+    /*
+     * Name the instruction that could not be emulated: without it the guest
+     * only sees an external abort and the cause is lost.
+     */
     if (env->pc != last_pc) {
         last_pc = env->pc;
-        cpu_memory_rw_debug(CPU(cpu), env->pc, &insn, sizeof(insn), false);
         error_report("kvm: no-syndrome data abort: pc=0x%" PRIx64
                      " insn=0x%08x ipa=0x%" PRIx64 " iss=0x%" PRIx64,
                      env->pc, insn, fault_ipa, esr_iss);
@@ -1561,6 +1595,21 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/*
+ * A guest SMCCC call in a range installed by kvm_arm_smccc_forward().
+ * KVM has already advanced the PC past the HVC/SMC.
+ */
+static int kvm_arm_handle_hypercall(ARMCPU *cpu)
+{
+    cpu_synchronize_state(CPU(cpu));
+    bql_lock();
+    if (!arm_smccc_dispatch(cpu)) {
+        cpu->env.xregs[0] = QEMU_PSCI_RET_NOT_SUPPORTED;
+    }
+    bql_unlock();
+    return 0;
+}
+
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -1576,6 +1625,9 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         /* External DABT with no valid iss to decode */
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
+        break;
+    case KVM_EXIT_HYPERCALL:
+        ret = kvm_arm_handle_hypercall(cpu);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: un-handled exit reason %d\n",
@@ -1909,6 +1961,27 @@ void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa)
     if (!kvm_arm_set_device_attr(cpu, &attr, "PVTIME IPA")) {
         error_report("failed to init PVTIME IPA");
         abort();
+    }
+}
+
+void kvm_arm_smccc_forward(uint32_t base, uint32_t nr)
+{
+    struct kvm_smccc_filter filter = {
+        .base = base,
+        .nr_functions = nr,
+        .action = KVM_SMCCC_FILTER_FWD_TO_USER,
+    };
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VM_SMCCC_CTRL,
+        .attr = KVM_ARM_VM_SMCCC_FILTER,
+        .addr = (uint64_t)&filter,
+    };
+    int ret = kvm_vm_ioctl(kvm_state, KVM_SET_DEVICE_ATTR, &attr);
+
+    if (ret) {
+        error_report("KVM: cannot forward SMCCC calls 0x%08x+0x%x to "
+                     "userspace: %s", base, nr, strerror(-ret));
+        exit(1);
     }
 }
 

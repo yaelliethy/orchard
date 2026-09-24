@@ -20,6 +20,7 @@
 #include "migration/blocker.h"
 #include "qom/object.h"
 #include "target/arm/cpregs.h"
+#include "target/arm/whpx_arm.h"
 
 #include "hw/arm/bsa.h"
 #include <winhvplatform.h>
@@ -151,6 +152,7 @@ static void whpx_gicv3_realize(DeviceState *dev, Error **errp)
     ERRP_GUARD();
     GICv3State *s = WHPX_GICV3(dev);
     WHPXARMGICv3Class *kgc = WHPX_GICV3_GET_CLASS(s);
+    uint64_t redist_base;
     int i;
 
     kgc->parent_realize(dev, errp);
@@ -185,10 +187,14 @@ static void whpx_gicv3_realize(DeviceState *dev, Error **errp)
 
     gicv3_init_irqs_and_mmio(s, whpx_gicv3_set_irq, NULL);
 
+    redist_base = whpx_arm_gic_addr("gic-redist-base", 0x080A0000);
+
     for (i = 0; i < s->num_cpu; i++) {
         CPUState *cpu_state = qemu_get_cpu(i);
         ARMCPU *cpu = ARM_CPU(cpu_state);
-        WHV_REGISTER_VALUE val = {.Reg64 = 0x080A0000 + (GICV3_REDIST_SIZE * i)};
+        WHV_REGISTER_VALUE val = {
+            .Reg64 = redist_base + GICV3_REDIST_SIZE * i,
+        };
         whpx_set_reg(cpu_state, WHvArm64RegisterGicrBaseGpa, val);
         define_arm_cp_regs(cpu, gicv3_cpuif_reginfo);
     }

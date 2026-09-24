@@ -27,8 +27,9 @@ ECID="${ECID:-}"                          # from images/config.json
 # 10G: `imported_mib=10241`, import kept.
 RAM="${RAM:-10G}"
 # 12 vCPUs boots to the desktop in ~75 s here. The earlier ceiling of 6 was a
-# livelock in XNU's startup pen, and that is fixed by ORCHARD_PAC_INHERIT rather
-# than by anything about WFE; measured at 12 with no WFE arm at all.
+# livelock in XNU's startup pen: secondaries came up without PAC keys and
+# faulted there. hw/vmapple/hvc.c now gives each core the keys when the kernel
+# asks (SET_INITIAL_STATE); no WFE arm is needed.
 CPUS="${CPUS:-12}"
 SERIAL_LOG="${SERIAL_LOG:-$ROOT/serial.txt}"
 
@@ -53,14 +54,6 @@ if [ ! -e "$OVERLAY" ]; then
   qemu-img create -f qcow2 -F raw -b "$DISK" "$OVERLAY" >/dev/null
   echo "created overlay $OVERLAY"
 fi
-
-# --- guest CPU --------------------------------------------------------------
-# The stock kernel verifies its own signed pointers, so PAC has to be real or it
-# dies with "JOP Hash Mismatch Detected". PAC_INHERIT gives a core brought up by
-# PSCI CPU_ON the keys firmware would have left it; without it every secondary
-# runs keyless and faults on its first authentication.
-export ORCHARD_REAL_PAUTH="${ORCHARD_REAL_PAUTH:-1}"
-export ORCHARD_PAC_INHERIT="${ORCHARD_PAC_INHERIT:-1}"
 
 # --- host GPU ---------------------------------------------------------------
 # An absolute ICD path is dlopen'd directly and cannot be hijacked by
@@ -93,7 +86,7 @@ exec "$QEMU" \
   -device vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on \
   -drive file="$OVERLAY",if=none,id=root,format=qcow2,cache=writeback,aio=threads,discard=unmap \
   -device vmapple-virtio-blk-pci,variant=root,drive=root \
-  -netdev user,id=net0 \
+  -netdev user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22 \
   -device virtio-net-pci,netdev=net0 \
   -chardev socket,id=ser0,path="$ROOT/serial.sock",server=on,wait=off,logfile="$SERIAL_LOG" \
   -serial chardev:ser0 \

@@ -41,7 +41,7 @@
 #include "hw/virtio/virtio-pci.h"
 #include "hw/vmapple/vmapple.h"
 #include "hw/vmapple/apple_vm_cpu.h"
-#include "hw/core/or-irq.h"
+#include "hw/vmapple/hvc.h"
 #include "target/arm/gtimer.h"
 #include "hw/display/reims-vgpu-shim.h"
 #include "target/arm/arm-powerctl.h"
@@ -54,6 +54,7 @@
 #include "standard-headers/linux/input.h"
 #include "system/hvf.h"
 #include "system/kvm.h"
+#include "system/tcg.h"
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
@@ -74,14 +75,6 @@ struct VMAppleMachineState {
     MemoryRegion ecam_alias;
     uint64_t uuid;
 
-    /*
-     * Apple-style timer delivery: route the architected timer to the CPU's
-     * FIQ (via a per-CPU OR gate) instead of to the GIC as a PPI. XNU reads
-     * CNTx_CTL in its FIQ handler and never programs the GIC for the timer,
-     * so the GIC-PPI route drops the tick. Set for the `apple-vm` machine.
-     */
-    bool fiq_timer;
-
     /* gfx=off: stub GFX/IOSurface MMIO instead of the GPU (headless). */
     bool no_gfx;
 
@@ -96,18 +89,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleMachineState, VMAPPLE_MACHINE)
 
 /* Orchard's own Apple VM machine with a custom CPU (see registration below). */
 #define TYPE_APPLE_VM_MACHINE  MACHINE_TYPE_NAME("apple-vm")
-
-/*
- * Out-of-tree KVM capability carried by orchard's host kernel patch
- * (Linux 6.17, KVM_CAP_ARM_APPLE_VM). It makes KVM honour the two Apple-VM contracts the TCG
- * model implements in QEMU: the architected timers reach the vCPU as FIQ
- * (fiq_timer below), and a core started by the kernel through PSCI CPU_ON
- * inherits its caller's pointer-authentication keys (ORCHARD_PAC_INHERIT).
- * The value sits far from upstream's range so it cannot alias a real cap.
- */
-#ifndef KVM_CAP_ARM_APPLE_VM
-#define KVM_CAP_ARM_APPLE_VM 20306
-#endif
 
 /* Number of external interrupt lines to configure the GIC with */
 #define NUM_IRQS 256
@@ -157,6 +138,9 @@ static const MemMapEntry memmap[] = {
     /* Actual RAM size depends on configuration */
     [VMAPPLE_MEM] =                { 0x70000000ULL, GiB},
 };
+
+/* No ITS: MSIs go through the GICv2m frame. See vmapple_instance_init(). */
+static const uint64_t vmapple_gic_its_base;
 
 static const int irqmap[] = {
     [VMAPPLE_UART] = 1,
@@ -367,49 +351,20 @@ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
     for (i = 0; i < smp_cpus; i++) {
         DeviceState *cpudev = DEVICE(qemu_get_cpu(i));
 
-        if (vms->fiq_timer) {
-            /*
-             * Apple-style timer delivery (see fiq_timer in VMAppleMachineState).
-             * XNU takes the architected timer on FIQ and figures out which one
-             * fired by reading CNTx_CTL — it never programs the GIC for the
-             * timer. So OR the arch timer outputs together with the GIC's FIQ
-             * line into the CPU's FIQ input (pattern borrowed from the a13/m2
-             * cores' per-CPU "fiq-or" gate), and leave the GIC handling device
-             * IRQs only.
-             */
-            DeviceState *fiq_or = qdev_new(TYPE_OR_IRQ);
+        /*
+         * Virtual timer -> PPI 27. xnu's pe_init_fiq() makes PPI 27 group 0
+         * and enables it, and GICv3 signals group 0 as FIQ: the path KVM and
+         * WHPX deliver the timer on too.
+         */
+        qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
+                              qdev_get_gpio_in(vms->gic,
+                                               arm_gic_ppi_index(i, 27)));
 
-            object_property_add_child(OBJECT(cpudev), "fiq-or",
-                                      OBJECT(fiq_or));
-            qdev_prop_set_uint16(fiq_or, "num-lines", 4);
-            qdev_realize_and_unref(fiq_or, NULL, &error_fatal);
-            qdev_connect_gpio_out(fiq_or, 0,
-                                  qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
-
-            /* GIC FIQ output -> OR line 0 */
-            sysbus_connect_irq(gicbusdev, i + smp_cpus,
-                               qdev_get_gpio_in(fiq_or, 0));
-            /* Architected timers -> OR lines 1/2 (no EL2 here, so no HYP) */
-            qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
-                                  qdev_get_gpio_in(fiq_or, 1));
-            qdev_connect_gpio_out(cpudev, GTIMER_PHYS,
-                                  qdev_get_gpio_in(fiq_or, 2));
-
-            /* GIC IRQ line -> CPU IRQ (device interrupts) */
-            sysbus_connect_irq(gicbusdev, i,
-                               qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
-        } else {
-            /* Map the virt timer to PPI 27 */
-            qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
-                                  qdev_get_gpio_in(vms->gic,
-                                                   arm_gic_ppi_index(i, 27)));
-
-            /* Map the GIC IRQ and FIQ lines to CPU */
-            sysbus_connect_irq(gicbusdev, i,
-                               qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
-            sysbus_connect_irq(gicbusdev, i + smp_cpus,
-                               qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
-        }
+        /* Map the GIC IRQ and FIQ lines to CPU */
+        sysbus_connect_irq(gicbusdev, i,
+                           qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
+        sysbus_connect_irq(gicbusdev, i + smp_cpus,
+                           qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
     }
 }
 
@@ -579,77 +534,15 @@ static void create_pcie(VMAppleMachineState *vms)
     }
 }
 
-/*
- * One pointer-authentication master key for the machine, installed on every CPU
- * before it comes out of reset.
- *
- * `t8030_cpu_reset` does exactly this -- one `qemu_guest_getrandom` value
- * written to every CPU's `m_key_lo/hi` under `CPU_FOREACH` -- and vmapple set it
- * on none, so every core reset with `keys.m` zero. That is the same shape as the
- * defect this machine actually dies of: a guest that programs key state once and
- * expects every core to agree.  `arm_cpu_reset_hold` copies these into
- * `env->keys.m`, so they must be assigned before the CPU reset that follows.
- *
- * Note what this does and does not reach. `keys.m` is XORed into a key write
- * only while `APCTL_AppleMode` is set, and this guest runs with `apctl=0x2`
- * (`APCTL_MKEYVld`) and that bit clear -- so on this guest the value is carried
- * but not yet consumed, and the PAC failure trace is what says whether it moved.
- */
-static void vmapple_install_pac_master_key(void)
-{
-    CPUState *cs;
-    uint64_t m_lo;
-    uint64_t m_hi;
-
-    qemu_guest_getrandom_nofail(&m_lo, sizeof(m_lo));
-    qemu_guest_getrandom_nofail(&m_hi, sizeof(m_hi));
-
-    CPU_FOREACH(cs) {
-        ARMCPU *arm_cpu = ARM_CPU(cs);
-
-        arm_cpu->m_key_lo = m_lo;
-        arm_cpu->m_key_hi = m_hi;
-    }
-}
-
 static void vmapple_reset(void *opaque)
 {
     VMAppleMachineState *vms = opaque;
 
-    vmapple_install_pac_master_key();
+    vmapple_hvc_reset();
 
     cpu_set_pc(first_cpu, vms->memmap[VMAPPLE_FIRMWARE].base);
 }
 
-/*
- * Direct XNU (macOS kernelcache) boot for the vmapple machine.
- *
- * Mirrors the t8030 path where QEMU itself acts as the bootloader: load and
- * ChefKiss-patch the kernelcache, lay it out in RAM, build the Apple boot-args
- * and the device tree, then jump straight to the kernel entry — bypassing
- * AVPBooter / LLB / iBoot and the whole secure-boot + fsboot chain.
- *
- * Enabled by passing -kernel <kernelcache.im4p> together with
- * -dtb <DeviceTree.vma2macosap.im4p>.  Simplified vs t8030: no KASLR, no SEP,
- * no TZ0, no AMCC carveout (vmapple has none of those).
- *
- * Copyright (c) 2026 Youssef Elliethy (yaelliethy)
- */
-/*
- * Apply the property overrides described by one of the ADT's osenvironments.
- *
- * AVPBooter normally expands these rules before entering XNU.  The direct
- * kernel path bypasses AVPBooter, so leaving the template values in /chosen
- * makes a BaseSystem boot select the normal securityd instead of
- * recovery_securityd.  That daemon cannot create Recovery's transient login
- * keychain and recoveryosd waits forever while establishing its Aqua session.
- *
- * Node-replacement rules (for example, the Recovery fstab overlay) are handled
- * elsewhere by the mounted BaseSystem startup path.  The /chosen property
- * rules are the bootloader state consumed directly by the kernel and launchd.
- *
- * Copyright (c) 2026 Youssef Elliethy (yaelliethy)
- */
 static void mach_vmapple_init(MachineState *machine)
 {
     VMAppleMachineState *vms = VMAPPLE_MACHINE(machine);
@@ -662,10 +555,6 @@ static void mach_vmapple_init(MachineState *machine)
 
     vms->memmap = memmap;
     machine->usb = true;
-
-    /* The apple-vm machine drives Apple-style timer-on-FIQ wiring. */
-    vms->fiq_timer =
-        object_dynamic_cast(OBJECT(machine), TYPE_APPLE_VM_MACHINE) != NULL;
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
     assert(possible_cpus->len == max_cpus);
@@ -697,11 +586,11 @@ static void mach_vmapple_init(MachineState *machine)
                                 &error_fatal);
 
         /*
-         * Apple's timebase runs at 24 MHz. XNU derives its tick<->time
-         * conversions from the counter frequency; if CNTFRQ reads back as 0
-         * (or the wrong value) the conversion loops spin forever. Pin it.
+         * Under TCG, emulate Apple's 24 MHz counter, the rate the guest's
+         * device tree states. Hardware accelerators expose the host's
+         * counter instead, and hw/vmapple/hvc.c corrects the device tree.
          */
-        if (vms->fiq_timer && object_property_find(cpu, "cntfrq")) {
+        if (tcg_enabled() && object_property_find(cpu, "cntfrq")) {
             object_property_set_int(cpu, "cntfrq", 24000000, &error_fatal);
         }
 
@@ -737,24 +626,7 @@ static void mach_vmapple_init(MachineState *machine)
     memory_region_add_subregion(sysmem, vms->memmap[VMAPPLE_MEM].base,
                                 machine->ram);
 
-    /*
-     * Under KVM the timers and PSCI live in the host kernel, so the fiq-or
-     * gate and the PAC_INHERIT hooks in target/arm never run. The host must
-     * provide the same contract, or the guest hangs on its first tick.
-     */
-#ifdef CONFIG_KVM
-    if (kvm_enabled() && vms->fiq_timer) {
-        if (!kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_APPLE_VM)) {
-            error_report("apple-vm under KVM needs a host kernel with "
-                         "KVM_CAP_ARM_APPLE_VM (Apple-VM KVM support)");
-            exit(1);
-        }
-        if (kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_APPLE_VM, 0) < 0) {
-            error_report("enabling KVM_CAP_ARM_APPLE_VM failed");
-            exit(1);
-        }
-    }
-#endif
+    vmapple_hvc_init();
 
     create_gic(vms, sysmem);
     create_gicv2m(vms);
@@ -881,6 +753,20 @@ static void vmapple_instance_init(Object *obj)
     object_property_add_bool(obj, "gfx", vmapple_get_gfx, vmapple_set_gfx);
     object_property_set_description(obj, "gfx",
                                     "Attach the GPU (off: stub MMIO, headless)");
+
+    /*
+     * The GIC layout, for accelerators whose in-kernel GIC is placed by
+     * address rather than by mapping QEMU's device (WHPX). The ITS base is 0
+     * (none), as OpenVMM passes WHP for a GICv2m machine.
+     */
+    object_property_add_uint64_ptr(obj, "gic-dist-base",
+                                   &memmap[VMAPPLE_GIC_DIST].base,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "gic-redist-base",
+                                   &memmap[VMAPPLE_GIC_REDIST].base,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "gic-its-base", &vmapple_gic_its_base,
+                                   OBJ_PROP_FLAG_READ);
 }
 
 static const TypeInfo vmapple_machine_info = {
@@ -895,8 +781,7 @@ static const TypeInfo vmapple_machine_info = {
  * `apple-vm` — Orchard's own Apple virtual machine. Identical device model to
  * `vmapple` (it inherits everything, so VMAPPLE_MACHINE() casts still work),
  * but drives our own apple-vm-cpu instead of the generic `host`/`max` core.
- * This gives us a machine + CPU pair we fully own, so Apple-VM hardware
- * changes (timer/interrupt routing, IMPDEF regs) live in our tree.
+ * This gives us a machine + CPU pair we fully own.
  *
  * Copyright (c) 2026 Youssef Elliethy (yaelliethy)
  */

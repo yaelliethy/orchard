@@ -43,8 +43,6 @@ struct CpuOnInfo {
     uint64_t context_id;
     uint32_t target_el;
     bool target_aa64;
-    bool pac_keys_valid;
-    ARMPACKey apia, apib, apda, apdb, apga, kernel;
 };
 
 
@@ -58,21 +56,6 @@ static void arm_set_cpu_on_async_work(CPUState *target_cpu_state,
     cpu_reset(target_cpu_state);
     arm_emulate_firmware_reset(target_cpu_state, info->target_el);
     target_cpu_state->halted = 0;
-
-    /*
-     * ORCHARD_PAC_INHERIT=1: a core brought up with PSCI CPU_ON inherits the
-     * PAC keys of the caller. The reset above zeroes them, so on a guest whose
-     * kernel programs the five key registers once on the boot CPU a secondary
-     * would run keyless and fault on its first authentication.
-     */
-    if (info->pac_keys_valid) {
-        target_cpu->env.keys.apia = info->apia;
-        target_cpu->env.keys.apib = info->apib;
-        target_cpu->env.keys.apda = info->apda;
-        target_cpu->env.keys.apdb = info->apdb;
-        target_cpu->env.keys.apga = info->apga;
-        target_cpu->env.keys.kernel = info->kernel;
-    }
 
     /* We check if the started CPU is now at the correct level */
     assert(info->target_el == arm_current_el(&target_cpu->env));
@@ -184,32 +167,6 @@ int arm_set_cpu_on(uint64_t cpuid, uint64_t entry, uint64_t context_id,
     info->context_id = context_id;
     info->target_el = target_el;
     info->target_aa64 = target_aa64;
-
-    /*
-     * Captured here, on the calling CPU's thread, because the async work runs
-     * on the target.
-     *
-     * The caller is the kernel, not a boot stage, when it runs at EL1 from the
-     * TTBR1 half of the address space: measured, the kernel's CPU_ON comes from
-     * a high pc while the boot stages call from low addresses. Both run at EL1,
-     * so EL alone does not tell them apart, and handing a boot stage's
-     * secondary the keys of its caller was measured to end in "Entering
-     * iBootStage1 recovery mode" before the kernel is ever loaded.
-     */
-    info->pac_keys_valid = false;
-    if (current_cpu && getenv("ORCHARD_PAC_INHERIT") &&
-        arm_current_el(&ARM_CPU(current_cpu)->env) == 1 &&
-        (ARM_CPU(current_cpu)->env.pc & (1ULL << 55))) {
-        CPUARMState *src = &ARM_CPU(current_cpu)->env;
-
-        info->apia = src->keys.apia;
-        info->apib = src->keys.apib;
-        info->apda = src->keys.apda;
-        info->apdb = src->keys.apdb;
-        info->apga = src->keys.apga;
-        info->kernel = src->keys.kernel;
-        info->pac_keys_valid = true;
-    }
 
     async_run_on_cpu(target_cpu_state, arm_set_cpu_on_async_work,
                      RUN_ON_CPU_HOST_PTR(info));

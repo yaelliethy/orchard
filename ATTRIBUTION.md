@@ -1,6 +1,9 @@
 # Attribution
 
-This tree combines three bodies of work.
+This tree combines three bodies of work. Earlier versions also carried Apple
+pointer-authentication register emulation derived from
+[Inferno](https://github.com/ChefKissInc/Inferno); the guest never uses those
+registers, and that code has been removed.
 
 ## QEMU
 
@@ -11,21 +14,6 @@ GPL-2.0-or-later.
 
 The upstream `vmapple` machine (`hw/vmapple/`) is by Alexander Graf and
 contributors; this tree extends it.
-
-## Inferno
-
-Parts of the Apple pointer-authentication support in `target/arm` are derived
-from [Inferno](https://github.com/ChefKissInc/Inferno), ChefKissInc's fork of
-QEMU (GPL-2.0-or-later):
-
-* `target/arm/helper.c` — the `KERNELKEYLO/HI_EL1`, `APCTL_EL1` and `APCFG_EL1`
-  register definitions, the key-write diversifier and `apctl_write`.
-* `target/arm/tcg/pauth_helper.c` — mixing the kernel key into EL1 signatures,
-  and enabling the keys in Apple mode.
-* `target/arm/cpu.h` — the fields and bit definitions those need.
-
-Everything else in `target/arm` here (the per-core key snapshot, PSCI CPU_ON key
-inheritance, the WFE park) is ours.
 
 ## reims-vgpu
 

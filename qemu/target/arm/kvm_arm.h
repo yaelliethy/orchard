@@ -223,6 +223,32 @@ void kvm_arm_pmu_set_irq(ARMCPU *cpu, int irq);
  */
 void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa);
 
+/**
+ * kvm_arm_smccc_forward:
+ * @base: first SMCCC function ID of the range
+ * @nr: number of function IDs in the range
+ *
+ * Ask KVM to forward guest SMCCC calls in [@base, @base + @nr) to userspace
+ * (KVM_EXIT_HYPERCALL), where the board handler registered with
+ * arm_smccc_set_handler() serves them. Must run before any vCPU has run.
+ */
+void kvm_arm_smccc_forward(uint32_t base, uint32_t nr);
+
+/**
+ * kvm_arm_gicv3_mmio:
+ * @pa: guest-physical address
+ * @val: data to store, or buffer for the load
+ * @size: access size in bytes (4 or 8)
+ * @is_write: store rather than load
+ *
+ * Apply an MMIO access to the in-kernel vGICv3 through its device-attribute
+ * interface: for accesses KVM hands back undecoded (KVM_EXIT_ARM_NISV) that
+ * fall inside the GIC. Returns false if @pa is not a vGIC register. The
+ * caller holds the BQL: other vCPUs are kicked out of KVM_RUN for the access.
+ */
+bool kvm_arm_gicv3_mmio(uint64_t pa, uint64_t *val, unsigned size,
+                        bool is_write);
+
 int kvm_arm_set_irq(int cpu, int irqtype, int irq, int level);
 
 void kvm_arm_enable_mte(Object *cpuobj, Error **errp);

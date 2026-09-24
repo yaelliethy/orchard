@@ -315,17 +315,6 @@ static uint64_t pauth_computepac_impdef(uint64_t data, uint64_t modifier,
 static uint64_t pauth_computepac(CPUARMState *env, uint64_t data,
                                  uint64_t modifier, ARMPACKey key)
 {
-    /*
-     * Apple mixes a machine-wide kernel key into every EL1 signature while
-     * APCTL_KernKeyEn is set. Carried from the Inferno fork
-     * (ChefKissInc/Inferno); without it a vmapple guest's kernel pointers
-     * authenticate against the wrong key the moment a second core touches them.
-     */
-    if (arm_current_el(env) && (env->cp15.apctl_el1 & APCTL_KernKeyEn)) {
-        key.lo ^= env->keys.kernel.lo;
-        key.hi ^= env->keys.kernel.hi;
-    }
-
     if (cpu_isar_feature(aa64_pauth_qarma5, env_archcpu(env))) {
         return pauth_computepac_architected(data, modifier, key, false);
     } else if (cpu_isar_feature(aa64_pauth_qarma3, env_archcpu(env))) {
@@ -511,10 +500,6 @@ static void pauth_check_trap(CPUARMState *env, int el, uintptr_t ra)
 
 static bool pauth_key_enabled(CPUARMState *env, int el, uint32_t bit)
 {
-    /* Apple mode enables the keys without the architected SCTLR bits. */
-    if (el > 0 && (env->cp15.apctl_el1 & APCTL_AppleMode)) {
-        return true;
-    }
     return (arm_sctlr(env, el) & bit) != 0;
 }
 

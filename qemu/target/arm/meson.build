@@ -58,6 +58,8 @@ arm_common_system_ss.add(files(
   'cpregs-omap.c',
   'cpu-irq.c',
   'machine.c',
+  'smccc.c',
+  'emulate-ldst.c',
   'ptw.c',
 ))
 

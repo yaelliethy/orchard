@@ -20,6 +20,7 @@ config VMAPPLE
     # vmapple support assumes a macOS host virtualising Apple silicon natively.
     default y if ARM
     imply PCI_DEVICES
+    select ARM_GIC
     select ARM_GICV3
     select PLATFORM_BUS
     select PCI_EXPRESS

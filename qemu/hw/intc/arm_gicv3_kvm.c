@@ -21,6 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "hw/core/cpu.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "hw/arm/virt.h"
 #include "qemu/error-report.h"
@@ -783,6 +784,107 @@ static int kvm_arm_gicv3_notifier(NotifierWithReturn *notifier,
     return 0;
 }
 
+/* The one in-kernel vGICv3, for kvm_arm_gicv3_mmio(). */
+static GICv3State *kvm_gicv3;
+
+/* How long to wait for the other vCPUs to leave KVM_RUN. */
+#define VGIC_UACCESS_TRIES      2000
+#define VGIC_UACCESS_WAIT_US    50
+
+/*
+ * One 32-bit vGIC register access through the device-attribute interface.
+ * @cpu is the redistributor's CPU, or -1 for the distributor.
+ *
+ * KVM serves these only when it can lock every vCPU (kvm_trylock_all_vcpus()
+ * in vgic-kvm-device.c) and answers -EBUSY while any other vCPU thread is in
+ * KVM_RUN, which includes powered-off cores waiting there for PSCI CPU_ON.
+ * The caller holds the BQL, so a vCPU kicked out of KVM_RUN waits for it and
+ * cannot re-enter; kick them and retry until the locks are free.
+ */
+static bool kvm_gicv3_reg_access(GICv3State *s, int cpu, uint64_t offset,
+                                 uint32_t *val, bool is_write)
+{
+    uint64_t typer = cpu < 0 ? 0 : s->cpu[cpu].gicr_typer;
+    struct kvm_device_attr attr = {
+        .group = cpu < 0 ? KVM_DEV_ARM_VGIC_GRP_DIST_REGS
+                         : KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
+        .attr = KVM_VGIC_ATTR(offset, typer),
+        .addr = (uintptr_t)val,
+    };
+    int ret;
+
+    for (int try = 0; try < VGIC_UACCESS_TRIES; try++) {
+        CPUState *other;
+
+        ret = kvm_device_ioctl(s->dev_fd, is_write ? KVM_SET_DEVICE_ATTR
+                                                   : KVM_GET_DEVICE_ATTR,
+                               &attr);
+        if (ret != -EBUSY) {
+            return ret == 0;
+        }
+        CPU_FOREACH(other) {
+            if (other != current_cpu) {
+                cpu_exit(other);
+            }
+        }
+        g_usleep(VGIC_UACCESS_WAIT_US);
+    }
+    return false;
+}
+
+/*
+ * Locate @pa in the distributor or a redistributor frame; *@cpu is -1 for
+ * the distributor.
+ */
+static bool kvm_gicv3_find(GICv3State *s, uint64_t pa, int *cpu,
+                           uint64_t *offset)
+{
+    uint64_t frame = gicv3_redist_size(s);
+
+    if (memory_region_is_mapped(&s->iomem_dist) &&
+        pa - s->iomem_dist.addr < memory_region_size(&s->iomem_dist)) {
+        *cpu = -1;
+        *offset = pa - s->iomem_dist.addr;
+        return true;
+    }
+    for (uint32_t r = 0; r < s->nb_redist_regions; r++) {
+        MemoryRegion *mr = &s->redist_regions[r].iomem;
+
+        if (memory_region_is_mapped(mr) &&
+            pa - mr->addr < memory_region_size(mr)) {
+            *cpu = s->redist_regions[r].cpuidx + (pa - mr->addr) / frame;
+            *offset = (pa - mr->addr) % frame;
+            return *cpu < s->num_cpu;
+        }
+    }
+    return false;
+}
+
+bool kvm_arm_gicv3_mmio(uint64_t pa, uint64_t *val, unsigned size,
+                        bool is_write)
+{
+    GICv3State *s = kvm_gicv3;
+    uint64_t offset;
+    int cpu;
+
+    /* vGIC registers are 32-bit; a 64-bit access is two of them. */
+    if (!s || (size != 4 && size != 8) || (pa & 3) ||
+        !kvm_gicv3_find(s, pa, &cpu, &offset)) {
+        return false;
+    }
+    for (unsigned i = 0; i < size / 4; i++) {
+        uint32_t word = *val >> (32 * i);
+
+        if (!kvm_gicv3_reg_access(s, cpu, offset + 4 * i, &word, is_write)) {
+            return false;
+        }
+        if (!is_write) {
+            *val = deposit64(*val, 32 * i, 32, word);
+        }
+    }
+    return true;
+}
+
 static void kvm_arm_gicv3_realize(DeviceState *dev, Error **errp)
 {
     GICv3State *s = KVM_ARM_GICV3(dev);
@@ -946,6 +1048,7 @@ static void kvm_arm_gicv3_realize(DeviceState *dev, Error **errp)
                               &c->kvm_reset_icc_ctlr_el1, false, &error_abort);
         }
     }
+    kvm_gicv3 = s;
 }
 
 static void kvm_arm_gicv3_class_init(ObjectClass *klass, const void *data)

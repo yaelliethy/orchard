@@ -440,12 +440,6 @@ static void arm_cpu_reset_hold(Object *obj, ResetType type)
         /* Sample rvbar at reset.  */
         env->cp15.rvbar = cpu->rvbar_prop;
         env->pc = env->cp15.rvbar;
-
-        if (env->aarch64 && cpu_isar_feature(aa64_pauth, cpu)) {
-            env->keys.m.lo = cpu->m_key_lo;
-            env->keys.m.hi = cpu->m_key_hi;
-            arm_apple_pac_reset(env);
-        }
 #endif
     } else {
 #if defined(CONFIG_USER_ONLY)
