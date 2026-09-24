@@ -56,7 +56,7 @@ rather than corrupted.
 ### Boot arguments
 
 There is no `-append` on this path: boot-args come from NVRAM. The aux holds two
-CHRP banks (at `0xa00000` length `0x2000`, and `0xa80000` length `0x80000`),
+CHRP banks (at `0xa00000` and `0xa80000`, both of length `0x80000`),
 each with an adler32 over `[base+0x14, base+banklen)` stored LE at `base+0x10`.
 The live one is the bank with the higher generation.
 
