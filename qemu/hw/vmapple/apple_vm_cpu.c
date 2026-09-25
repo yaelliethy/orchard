@@ -9,6 +9,11 @@
  * Its one setting is real PAC under TCG; everything else vmapple needs from
  * the CPU is architected (see hw/vmapple/hvc.c).
  *
+ * `wfe-monitor-ns` (target/arm) is left at 0. A bounded WFE sleep in XNU's
+ * LDXR;WFE lock loops cut idle host CPU but measured no faster to the desktop
+ * (238 s at 0 against 261-337 s at 20-200 us); set it with
+ * -global apple-vm-arm-cpu.wfe-monitor-ns=N to trade latency for idle power.
+ *
  * Copyright (c) 2026 Youssef Elliethy (yaelliethy)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later

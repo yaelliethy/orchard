@@ -968,6 +968,12 @@ struct ArchCPU {
     QEMUTimer *pmu_timer;
     /* Timer used for WFxT timeouts OR event stream events */
     QEMUTimer *wfxt_timer;
+    /*
+     * TCG only: how long a WFE executed with the exclusive monitor armed may
+     * sleep before waking itself (ns). 0 keeps upstream behaviour, where such
+     * a WFE returns at once and the lock loop around it busy-spins.
+     */
+    uint32_t wfe_monitor_ns;
 
     /* GPIO outputs for generic timer */
     qemu_irq gt_timer_outputs[NUM_GTIMERS];

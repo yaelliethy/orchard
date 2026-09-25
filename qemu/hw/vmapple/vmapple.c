@@ -525,6 +525,17 @@ static void create_pcie(VMAppleMachineState *vms)
 
     if (defaults_enabled()) {
         usb_controller = qdev_new(TYPE_QEMU_XHCI);
+        /*
+         * macOS leaves MSI/MSI-X off on this controller and runs it on INTx,
+         * but points the HID transfer rings at interrupter 1. Only
+         * interrupter 0 can drive INTx, so without remapping, keyboard and
+         * tablet completions raised no interrupt and the guest saw them on
+         * the next MFINDEX wrap, every 2.048 s: key-ups arrived late (keys
+         * auto-repeated), a click became a long press (the Dock's menu) and
+         * menus closed on the next move. Remap to interrupter 0 whenever
+         * neither MSI nor MSI-X is enabled.
+         */
+        qdev_prop_set_bit(usb_controller, "conditional-intr-mapping", true);
         qdev_realize_and_unref(usb_controller, BUS(pci->bus), &error_fatal);
 
         usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,

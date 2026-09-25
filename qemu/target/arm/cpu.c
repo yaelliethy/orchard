@@ -2501,6 +2501,7 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("backcompat-cntfrq", ARMCPU, backcompat_cntfrq, false),
     DEFINE_PROP_BOOL("backcompat-pauth-default-use-qarma5", ARMCPU,
                       backcompat_pauth_default_use_qarma5, false),
+    DEFINE_PROP_UINT32("wfe-monitor-ns", ARMCPU, wfe_monitor_ns, 0),
 };
 
 static const gchar *arm_gdb_arch_name(CPUState *cs)

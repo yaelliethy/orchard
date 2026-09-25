@@ -616,13 +616,26 @@ void HELPER(wfe)(CPUARMState *env, uint32_t insn_len)
      * instruction the architecture allows for the PE to leave
      * low-power state for any reason. QEMU chooses to treat being in
      * an exclusive region as such and return directly.
+     *
+     * With wfe-monitor-ns set we sleep instead, but never for longer than
+     * that: the store that releases the lock does not wake us, so the bound
+     * is what keeps this deadlock-free. A spin-lock waiter then costs one
+     * wakeup per bound rather than a host thread spinning flat out.
      */
     if (env->exclusive_addr != -1) {
-        return;
-    }
+        int64_t deadline, next_event;
 
-    /* For A-profile we also can be woken by the event stream */
-    if (cpu->wfxt_timer) {
+        if (!cpu->wfxt_timer || !cpu->wfe_monitor_ns) {
+            return;
+        }
+        deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + cpu->wfe_monitor_ns;
+        next_event = gt_calc_next_event_stream(env);
+        if (next_event > 0 && next_event < deadline) {
+            deadline = next_event;
+        }
+        timer_mod(cpu->wfxt_timer, deadline);
+    } else if (cpu->wfxt_timer) {
+        /* For A-profile we also can be woken by the event stream */
         int64_t next_event = gt_calc_next_event_stream(env);
         if (next_event > 0) {
             timer_mod(cpu->wfxt_timer, next_event);
