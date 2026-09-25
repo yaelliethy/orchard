@@ -3,9 +3,12 @@
 
 Why it is this careful:
 
-The aux holds two CHRP NVRAM banks, at 0xa00000 (length 0x2000) and 0xa80000
-(length 0x80000); the one with the higher generation is live. Each bank stores
-an adler32 over `[base+0x14, base+banklen)` little-endian at `base+0x10`.
+The aux holds two CHRP NVRAM banks, at 0xa00000 and 0xa80000, both 0x80000
+long; the one with the higher generation is live. Each bank stores an adler32
+over `[base+0x14, base+banklen)` little-endian at `base+0x10`. On the pristine
+tart aux the stored checksum of *both* banks matches only over 0x80000 bytes
+(over 0x2000 neither does), and the 0xa00000 bank is the live one (generation
+45 against 44).
 
 **Append-only works; re-serialising the entry list does not.** Rewriting the
 list makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
@@ -26,7 +29,7 @@ import shutil
 import sys
 import zlib
 
-BANKS = ((0xA00000, 0x2000), (0xA80000, 0x80000))
+BANKS = ((0xA00000, 0x80000), (0xA80000, 0x80000))
 GEN_OFF = 0x14          # generation counter, LE u32, first word of the payload
 CKSUM_OFF = 0x10        # adler32 of [base+0x14, base+banklen), LE u32
 
