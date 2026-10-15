@@ -34,6 +34,7 @@ below fetch or patch them in place.
 | RAM | 16 GB+ — the guest gets 10 GB by default, and the whole RAMBlock is imported into one Vulkan heap, so the host needs that much importable GPU memory too. |
 | Disk | ~40 GB for the macOS image (50 GB apparent, sparse). |
 | Tools | `cargo` (stable Rust), a C toolchain, `ninja`, `meson`, `python3` with `requests` and `lz4`. |
+| Libraries | QEMU's build dependencies, including a crypto library: gnutls, nettle or libgcrypt (Debian/Ubuntu: `libgnutls28-dev`). The guest's AES engine runs on it; without one QEMU refuses to start the VM, and `scripts/build.sh` stops before compiling. |
 | Extra tool | [`apfs-fuse`](https://github.com/sgan81/apfs-fuse), to read the macOS image — that is where the firmware comes from. |
 
 ## Getting it running
