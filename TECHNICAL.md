@@ -56,16 +56,19 @@ rather than corrupted.
 ### Boot arguments
 
 There is no `-append` on this path: boot-args come from NVRAM. The aux holds two
-CHRP banks (at `0xa00000` length `0x2000`, and `0xa80000` length `0x80000`),
-each with an adler32 over `[base+0x14, base+banklen)` stored LE at `base+0x10`.
-The live one is the bank with the higher generation.
+banks of `0x80000` bytes, at `0xa00000` and `0xa80000`; the live one is the bank
+with the higher generation. Each bank is a list of CHRP partitions: a 32-byte
+`nvram` header (adler32 over `[base+0x14, base+0x80000)` stored LE at
+`base+0x10`, generation at `base+0x14`), then `common` at `+0x20` and `system`
+at `+0x60000`. On the stock image the last entry of `system` is an empty
+`boot-args=`.
 
-**Append-only works; re-serialising the entry list does not.** A rewritten list
-makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
+**Edit one entry in place; re-serialising the entry list does not work.** A
+rewritten list makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
 `boot-command=recover`, and loop (measured: 523 iterations of stage 1, no stage
-2). `scripts/prepare-aux.py` therefore appends one `KEY=VALUE\0` after the last
-entry and fixes only that bank's checksum — 25 bytes differ for
-`boot-args=-v serial=3`.
+2). `scripts/prepare-aux.py` therefore changes only the entry it sets, inside
+its partition, and fixes that bank's checksum. With a wrong checksum, or an
+entry written over a partition header, the guest boots without the new value.
 
 ---
 
@@ -240,7 +243,7 @@ iBoot → XNU` to complete on TCG meant finding, one boot at a time, what the
 chain requires: the disk attached both as pflash and as virtio so `fsboot` can
 read boot objects; the image's *own* NVRAM, because the LocalPolicy is
 personalised; the image's *own* ECID passed as the machine UUID; and NVRAM
-edited append-only, because a re-serialised variable list makes iBoot set
+entries edited in place, because a re-serialised variable list makes iBoot set
 `iboot-failure-reason=0x65` and loop forever. Each of those is a measured fact
 with a failure mode attached, and none of them is documented anywhere.
 

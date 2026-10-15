@@ -6,7 +6,7 @@
 | `fetch-tart-image.py` | Pulls the macOS disk, the NVRAM (aux) and the VM config from a tart OCI image. Resumable; prints the ECID. |
 | `extract-avpbooter.py` | Takes Apple's VM firmware out of the macOS image (it ships inside `Virtualization.framework`), so no Mac is needed. Needs `apfs-fuse`. |
 | `patch-avpbooter.py` | Turns that firmware into one that runs here. Checks the bytes before writing. |
-| `prepare-aux.py` | Appends a variable (e.g. `boot-args`) to the live NVRAM bank and fixes its checksum. `--show` lists what is there. |
+| `prepare-aux.py` | Sets a variable (e.g. `boot-args`) in the live NVRAM bank, inside the partition that holds it, and fixes the bank checksum. `--show` lists what is there. |
 | `run-vm.sh` | Boots the guest in the foreground. Every flag is commented with the measurement behind it. |
 | `boot-robust.sh` | Boots in the background, resets nothing, and refuses to start a second VM against the same images. |
 
