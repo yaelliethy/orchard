@@ -32,6 +32,10 @@ RAM="${RAM:-10G}"
 # asks (SET_INITIAL_STATE); no WFE arm is needed.
 CPUS="${CPUS:-12}"
 SERIAL_LOG="${SERIAL_LOG:-$ROOT/serial.txt}"
+# Host address for the guest SSH forward (port 2222). The image logs in with
+# the well-known admin/admin, so the default keeps it off the network; set
+# SSH_ADDR=0.0.0.0 to reach the guest from another machine.
+SSH_ADDR="${SSH_ADDR:-127.0.0.1}"
 
 for f in "$QEMU" "$DISK" "$AUX" "$ROM"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
@@ -86,7 +90,7 @@ exec "$QEMU" \
   -device vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on \
   -drive file="$OVERLAY",if=none,id=root,format=qcow2,cache=writeback,aio=threads,discard=unmap \
   -device vmapple-virtio-blk-pci,variant=root,drive=root \
-  -netdev user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22 \
+  -netdev user,id=net0,hostfwd=tcp:"$SSH_ADDR":2222-:22 \
   -device virtio-net-pci,netdev=net0 \
   -chardev socket,id=ser0,path="$ROOT/serial.sock",server=on,wait=off,logfile="$SERIAL_LOG" \
   -serial chardev:ser0 \

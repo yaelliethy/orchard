@@ -416,7 +416,8 @@ refuses screenshots to non-portal clients. What works:
 For anything that is not a pixel question, use the guest itself: `run-vm.sh`
 forwards host port 2222 to the guest's SSH (`ssh -p 2222 admin@127.0.0.1`, the
 image's `admin`/`admin`). The first login after boot takes one to three minutes
-under TCG while launchd starts sshd. The forward listens on all host interfaces.
+under TCG while launchd starts sshd. The forward listens on 127.0.0.1 only;
+`SSH_ADDR=0.0.0.0` opens it to other machines, with that well-known login.
 
 ### Performance, and the KVM question
 
