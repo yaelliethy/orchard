@@ -597,12 +597,13 @@ static void mach_vmapple_init(MachineState *machine)
                                 &error_fatal);
 
         /*
-         * Under TCG, emulate Apple's 24 MHz counter, the rate the guest's
-         * device tree states. Hardware accelerators expose the host's
-         * counter instead, and hw/vmapple/hvc.c corrects the device tree.
+         * Under TCG the counter ticks every gt_cntfrq_period_ns() whole
+         * nanoseconds, so Apple's 24 MHz would run at 1e9/41 Hz. 25 MHz
+         * runs exactly. hw/vmapple/hvc.c writes the rate into the guest's
+         * device tree, as it does for a hardware accelerator's counter.
          */
         if (tcg_enabled() && object_property_find(cpu, "cntfrq")) {
-            object_property_set_int(cpu, "cntfrq", 24000000, &error_fatal);
+            object_property_set_int(cpu, "cntfrq", 25000000, &error_fatal);
         }
 
         /*

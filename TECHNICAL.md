@@ -192,17 +192,28 @@ xnu takes its timebase from `/cpus/<cpu>/timebase-frequency` in the device tree
 `CNTFRQ_EL0` (`pexpert/arm/pe_identify_machine.c`). Apple's device tree says
 24 MHz, and iBoot does not correct it.
 
-Under TCG the counter is emulated at 24 MHz, so they agree. Under a hardware
-accelerator the guest reads the host's counter, which no hypervisor can
-rescale. So on the boot CPU's `SET_INITIAL_STATE` — before `arm_init()` reaches
-`pe_identify_machine()` — `hvc.c` rewrites every `timebase-frequency` record
-(exact name, length 8, value 24000000) in the device tree iBoot already loaded
-and verified, to the real counter rate. It does nothing when the counter is
-24 MHz.
+Under a hardware accelerator the guest reads the host's counter, which no
+hypervisor can rescale. So on the boot CPU's `SET_INITIAL_STATE` — before
+`arm_init()` reaches `pe_identify_machine()` — `hvc.c` rewrites every
+`timebase-frequency` record (exact name, length 8, value 24000000) in the device
+tree iBoot already loaded and verified, to the real counter rate. It does
+nothing when the counter is 24 MHz.
 
-Measured under TCG with the counter at 19.2 MHz, guest clock against host clock
-over 120 s: **1.0006 ± 0.003** with the rewrite (`hw.tbfrequency` 19200000),
-**0.801 ± 0.0003** without it.
+Under TCG the counter cannot run at 24 MHz: QEMU advances it once every whole
+number of nanoseconds, and 24 MHz would need 41.67 ns, so a counter set to 24
+MHz runs at 1e9/41 = 24.39 MHz, and a guest told 24 MHz gains 1.6 %. `vmapple.c`
+therefore sets it to 25 MHz, 40 ns a tick, and `hvc.c` rewrites the device tree
+to that, as above. Telling the guest 1e9/41 Hz instead does not work: xnu turns
+the rate into `mach_timebase_info`, 1e9/rate in lowest terms, and with
+1000000000/24390243 macOS's own code overflows converting a ten-minute interval
+to ticks (parsecd, systemstats and UserEventAgent died with `SIGTRAP` within
+minutes). Whatever the rate, that fraction has to stay small; 25 MHz gives 40/1.
+
+Measured under TCG, guest clock against host clock: **+1.626 %** over 300 s with
+the counter at 24 MHz and the guest told 24 MHz; at 25 MHz, within **0.0001 %**
+over 300 s and over 900 s (`hw.tbfrequency` 25000000). Earlier, with the counter
+at 19.2 MHz, over 120 s: **1.0006 ± 0.003** with the rewrite (`hw.tbfrequency`
+19200000), **0.801 ± 0.0003** without it.
 
 ### How many vCPUs
 
@@ -323,7 +334,7 @@ emulation; the vmapple changes live in `hw/vmapple`.
 
 | File | What and why |
 |---|---|
-| `hw/vmapple/vmapple.c` | The `apple-vm` machine: the reims-vgpu device, CHRP NVRAM building, the GICv2m/MSI wiring newer guests need, a 24 MHz counter under TCG, and the GIC layout published as `gic-dist-base`/`gic-redist-base`/`gic-its-base` properties for WHPX. |
+| `hw/vmapple/vmapple.c` | The `apple-vm` machine: the reims-vgpu device, CHRP NVRAM building, the GICv2m/MSI wiring newer guests need, a 25 MHz counter under TCG (§2), and the GIC layout published as `gic-dist-base`/`gic-redist-base`/`gic-its-base` properties for WHPX. |
 | `hw/vmapple/hvc.c` (new) | The Apple hypercall service: PAC keys per core, the per-process key calls, and the device-tree timebase rewrite (§2). |
 | `hw/vmapple/bdif.c` | The backdoor interface: **NVRAM block writes** (upstream drops them, so the guest could never persist a boot variable), plus the virtual-USB queue lifecycle. |
 | `hw/vmapple/cfg.c` | A guest-visible 64-byte random seed at the fixed offset `0x5c8`, and `production-mode` as a property. |
