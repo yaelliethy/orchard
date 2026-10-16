@@ -91,10 +91,26 @@ the disk and grows the APFS container into the space Cirrus left unpartitioned
 average at 300–375, so leave a fresh image's first boot alone until it is done.
 A restart after it boots normally. Agent 0.7.0 then exits and launchd restarts
 it every 10 s, and its LaunchAgent retries Tart's clipboard and vsock channels
-every second. Nothing here uses the agent: once `/tmp/tart-guest-daemon.log`
-says `successfully resized the disk`, `sudo launchctl bootout
-system/org.cirruslabs.tart-guest-daemon` and moving both plists out of
-`/Library/LaunchDaemons` and `/Library/LaunchAgents` retires it.
+every second. Nothing here uses the agent, so `scripts/guest.py prepare` waits
+for the daemon's first run to end, then stops both jobs and moves their plists
+aside. It waits even while the daemon is not loaded: launchd loads
+`/Library/LaunchDaemons` only after macOS's own guest agent answers (the daemon
+started 46 s later in one run), and a plist moved away before that never runs,
+which leaves the container at 44.1 GB. `boot-robust.sh` runs prepare each time
+it starts the VM; it does nothing once the jobs are gone.
+
+### macOS's own guest agent
+
+macOS ships `/usr/libexec/AppleQEMUGuestAgent`, and launchd starts it when the
+guest has a virtio-serial port named `org.qemu.guest_agent.0`. It speaks the
+QEMU guest agent protocol: `guest-exec` (as root), `guest-file-*`,
+`guest-set-time`, `guest-shutdown`, `apple-guest-set-remote-login`.
+`run-vm.sh` adds that port next to the Tart one and connects it to
+`$ROOT/qga.sock`; `scripts/guest.py` is the client. Each time `boot-robust.sh`
+starts the VM it uses it to set the guest clock from the host, because timed
+cannot store its RTC offset here and otherwise starts from a stale file
+timestamp, and to retire the Tart agent as above. The socket takes one client
+at a time, and the agent runs anything as root: treat it like the guest itself.
 
 ---
 

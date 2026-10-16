@@ -11,7 +11,11 @@ images/
 serial.txt
 serial.sock
 qmp.sock
+qga.sock
+qga.sock.lock
 vm.log
+guest.log
+__pycache__/
 
 # QEMU ships an SSH test fixture (tests/keys/id_rsa) that secret scanning
 # blocks on push. Nothing here builds or runs it.

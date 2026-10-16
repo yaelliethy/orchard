@@ -85,6 +85,9 @@ export GDK_BACKEND="${GDK_BACKEND:-wayland}"
 # the agent sends SIGTERM to its parent -- launchd -- and macOS shuts down and
 # restarts a couple of minutes into every boot. Give it the port. The name must
 # carry a Tart version, semver 2.0.0 or later, not the agent's own version.
+# The same virtio-serial device carries org.qemu.guest_agent.0, for macOS's own
+# guest agent; scripts/guest.py talks to it through $ROOT/qga.sock. The agent
+# runs commands as root, so the socket is as sensitive as the guest itself.
 
 exec "$QEMU" \
   -M apple-vm,uuid="$ECID" \
@@ -102,6 +105,8 @@ exec "$QEMU" \
   -chardev null,id=tartver \
   -device virtio-serial-pci,id=vser0 \
   -device virtserialport,bus=vser0.0,chardev=tartver,name=tart-version-2.41.1 \
+  -chardev socket,id=qga0,path="$ROOT/qga.sock",server=on,wait=off \
+  -device virtserialport,bus=vser0.0,chardev=qga0,name=org.qemu.guest_agent.0 \
   -chardev socket,id=ser0,path="$ROOT/serial.sock",server=on,wait=off,logfile="$SERIAL_LOG" \
   -serial chardev:ser0 \
   -qmp unix:"$ROOT/qmp.sock",server=on,wait=off \

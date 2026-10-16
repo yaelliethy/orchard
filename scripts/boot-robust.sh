@@ -31,4 +31,11 @@ rm -f "$ROOT/serial.txt"
 export RADV_DEBUG="${RADV_DEBUG:-nodcc,nohiz}"
 
 nohup "$ROOT/scripts/run-vm.sh" > "$ROOT/vm.log" 2>&1 < /dev/null &
-echo "booted; serial -> $ROOT/serial.txt, device log -> $ROOT/vm.log"
+
+# Once macOS is up, through its own guest agent: set its clock from the host
+# (it otherwise starts from a stale file timestamp), and on a Cirrus base image
+# retire tart-guest-agent. This runs once per VM start, not after a restart
+# inside the guest; both steps are idempotent.
+nohup sh -c 'g="$1/scripts/guest.py"; "$g" wait && { "$g" settime; "$g" prepare; }' \
+  sh "$ROOT" > "$ROOT/guest.log" 2>&1 < /dev/null &
+echo "booted; serial -> $ROOT/serial.txt, device log -> $ROOT/vm.log, guest setup -> $ROOT/guest.log"

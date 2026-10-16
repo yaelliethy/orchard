@@ -54,7 +54,9 @@ scripts/patch-avpbooter.py images/AVPBooter.vmapple2.bin images/AVPBooter.patche
 scripts/prepare-aux.py images/aux.img --set 'boot-args=-v serial=3'
 
 # 5. boot
-scripts/boot-robust.sh      # or scripts/run-vm.sh to stay in the foreground
+scripts/boot-robust.sh      # or scripts/run-vm.sh to stay in the foreground, and
+                            # from a second terminal: scripts/guest.py wait &&
+                            # scripts/guest.py settime && scripts/guest.py prepare
 ```
 
 The desktop appears in the device's own Vulkan window. First boot to the login
