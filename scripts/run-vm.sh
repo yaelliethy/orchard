@@ -79,6 +79,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export GDK_BACKEND="${GDK_BACKEND:-wayland}"
 
+# --- Tart's version port ----------------------------------------------------
+# Cirrus Labs' images run tart-guest-agent as a LaunchDaemon. Unless the guest
+# has /dev/cu.tart-version-<version>, the dummy virtio-console port Tart adds,
+# the agent sends SIGTERM to its parent -- launchd -- and macOS shuts down and
+# restarts a couple of minutes into every boot. Give it the port. The name must
+# carry a Tart version, semver 2.0.0 or later, not the agent's own version.
+
 exec "$QEMU" \
   -M apple-vm,uuid="$ECID" \
   -accel tcg,thread=multi,tb-size=2048 \
@@ -92,6 +99,9 @@ exec "$QEMU" \
   -device vmapple-virtio-blk-pci,variant=root,drive=root \
   -netdev user,id=net0,hostfwd=tcp:"$SSH_ADDR":2222-:22 \
   -device virtio-net-pci,netdev=net0 \
+  -chardev null,id=tartver \
+  -device virtio-serial-pci,id=vser0 \
+  -device virtserialport,bus=vser0.0,chardev=tartver,name=tart-version-2.41.1 \
   -chardev socket,id=ser0,path="$ROOT/serial.sock",server=on,wait=off,logfile="$SERIAL_LOG" \
   -serial chardev:ser0 \
   -qmp unix:"$ROOT/qmp.sock",server=on,wait=off \

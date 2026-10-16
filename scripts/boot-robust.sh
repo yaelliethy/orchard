@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Boot and leave the guest alone.
 #
-# macOS finishes install/update sequences ACROSS reboots and records progress in
-# NVRAM (the aux) and on disk (the overlay). Copying frozen baselines over
-# either before a boot wipes that progress, so the guest retries phase 1 forever
-# and every session looks like a permanent reboot loop. This script therefore
-# resets nothing: expect 2-5 restarts on a fresh image, then convergence.
+# The aux holds the guest's NVRAM and the overlay its disk; copying frozen
+# baselines over either before a boot throws away what the guest wrote. This
+# script therefore resets nothing.
 #
 # It also refuses to start a second VM against the same images, because two
 # QEMUs sharing one overlay corrupt it.

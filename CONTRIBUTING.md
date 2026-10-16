@@ -83,13 +83,13 @@ touching the machine, the devices or `target/arm`:
 For a change to the boot chain or NVRAM handling, also boot **twice**: some
 failures only appear on the second boot, because the guest persists state.
 
-## Guest state, and why a fresh clone reboots a few times
+## Guest state, and the restart loop
 
-macOS completes install and update sequences across reboots. A guest that
-restarts two to five times on a fresh image is behaving normally; resetting the
-aux or the overlay between boots wipes its progress and produces an endless
-loop that looks like a bug in this tree. Do not "fix" a reboot loop by resetting
-state — see *Known problems* in `TECHNICAL.md`.
+A fresh image used to restart a couple of minutes into every boot, without
+end. That was not install progress: the image's `tart-guest-agent` restarts any
+guest that lacks Tart's version port, which `run-vm.sh` now provides (see *The
+guest agent's Tart check* in `TECHNICAL.md`). Still leave the aux and the
+overlay alone between boots: they are the guest's NVRAM and disk.
 
 ## Legal
 

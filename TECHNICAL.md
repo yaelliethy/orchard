@@ -70,6 +70,32 @@ rewritten list makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
 its partition, and fixes that bank's checksum. With a wrong checksum, or an
 entry written over a partition header, the guest boots without the new value.
 
+### The guest agent's Tart check
+
+Cirrus Labs' images run `tart-guest-agent` as a root LaunchDaemon. Before
+anything else it looks for `/dev/cu.tart-version-<version>`, the dummy
+virtio-console port Tart adds for such checks, and when that is missing it sends
+SIGTERM to its parent (`internal/command/root.go` in agent 0.7.0). The parent is
+launchd: it logs `System shutdown initiated by kernel - launchd got a SIGTERM`,
+shuts down in order and reboots, a couple of minutes into every boot, without
+end. `run-vm.sh` therefore adds a virtio-serial port named
+`tart-version-2.41.1` (the agent wants a Tart version, semver 2.0.0 or later);
+macOS's own virtio-console driver turns it into the device node. Measured on a
+fresh image with the aux and overlay kept across guest restarts: without the
+port, 14 restarts in 40 min, one every 150–170 s; with it, none in 10–15 min,
+in each of three runs.
+
+With the check satisfied the agent carries on as under Tart. Once, it repairs
+the disk and grows the APFS container into the space Cirrus left unpartitioned
+(to 49.9 GB, on the overlay); that took 268–318 s of guest time with the load
+average at 300–375, so leave a fresh image's first boot alone until it is done.
+A restart after it boots normally. Agent 0.7.0 then exits and launchd restarts
+it every 10 s, and its LaunchAgent retries Tart's clipboard and vsock channels
+every second. Nothing here uses the agent: once `/tmp/tart-guest-daemon.log`
+says `successfully resized the disk`, `sudo launchctl bootout
+system/org.cirruslabs.tart-guest-daemon` and moving both plists out of
+`/Library/LaunchDaemons` and `/Library/LaunchAgents` retires it.
+
 ---
 
 ## 2. The CPU
@@ -269,9 +295,8 @@ for the first time.
 **The operating knowledge.** Which of these matter is itself a result: 10 GB of
 guest RAM because the RAMBlock must fit one Vulkan heap; plain anonymous RAM
 rather than memfd because amdgpu's userptr rejects shared file mappings; 12
-vCPUs because MTTCG's costs overtake the parallelism past that; and leaving
-guest state alone across restarts because macOS finishes its install phases
-across reboots.
+vCPUs because MTTCG's costs overtake the parallelism past that; and the Tart
+version port, because the image's guest agent restarts any guest without it.
 
 ---
 
@@ -359,18 +384,6 @@ project.
 
 These are open, measured, and not worked around. A run that hits them is
 behaving as expected for this tree.
-
-### The guest restarts a few times before it settles
-
-**Wait through 2–5 restarts on a fresh image.** macOS completes install and
-update sequences *across* reboots (installer phases, MobileSoftwareUpdate,
-firmware update) and records its progress in NVRAM and on disk. Until those
-phases are satisfied the guest keeps restarting — and it converges only if the
-state is left alone. Resetting the aux or the overlay between boots wipes the
-progress and the guest retries phase 1 forever, which looks exactly like a
-permanent reboot loop. Real hardware (and tart) persists both; so must you.
-
-A restart takes 200–340 s of guest time and is kernel-initiated and orderly.
 
 ### A GPU page-table panic
 
