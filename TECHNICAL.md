@@ -260,6 +260,13 @@ file mappings, so the whole-RAM import then fails with
 alias failures in the log on an anonymous-RAM host are **expected**; those maps
 take the copying rails.
 
+One change to `reims-vgpu` itself matters on NVIDIA: the window waits up to
+2 ms for a swapchain image. NVIDIA's Wayland driver reads the compositor's
+buffer releases only while an acquire is allowed to wait, so with the original
+timeout of 0 the window presented its first frames and then nothing (one boot:
+875 frames offered, 3 presented). With 2 ms every offered frame is presented.
+It is steelbrain/reims-vgpu#99, carried here until it is merged there.
+
 ---
 
 ### Where the firmware comes from, and why that matters
