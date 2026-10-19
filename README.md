@@ -30,11 +30,13 @@ below fetch or patch them in place.
 
 | | |
 |---|---|
-| Host | Linux, x86-64. A Vulkan GPU (developed on AMD RENOIR / Mesa RADV). |
+| Host | Linux, x86-64. A Vulkan GPU (developed on AMD RENOIR / Mesa RADV). On NVIDIA, run with `REIMS_VGPU_GUEST_IMPORT=off REIMS_VGPU_LAZY_WRITEBACK=off`; with either on, parts of the desktop come out black or striped ([reims-vgpu#100](https://github.com/steelbrain/reims-vgpu/issues/100), [#101](https://github.com/steelbrain/reims-vgpu/issues/101)). |
 | RAM | 16 GB+ — the guest gets 10 GB by default, and the whole RAMBlock is imported into one Vulkan heap, so the host needs that much importable GPU memory too. |
 | Disk | ~40 GB for the macOS image (50 GB apparent, sparse). |
 | Tools | `cargo` (stable Rust), a C toolchain, `ninja`, `meson`, `python3` with `requests` and `lz4`. |
+| Libraries | QEMU's build dependencies, including a crypto library: gnutls, nettle or libgcrypt (Debian/Ubuntu: `libgnutls28-dev`). The guest's AES engine runs on it; without one QEMU refuses to start the VM, and `scripts/build.sh` stops before compiling. |
 | Extra tool | [`apfs-fuse`](https://github.com/sgan81/apfs-fuse), to read the macOS image — that is where the firmware comes from. |
+| Shader tools | `llvm-dis` (LLVM) and `spirv-val` (SPIRV-Tools) on `PATH` when the VM runs (Debian/Ubuntu: `llvm`, `spirv-tools`). The GPU translates the guest's shaders with them; without them the window stays black, and `run-vm.sh` warns. |
 
 ## Getting it running
 
@@ -53,7 +55,9 @@ scripts/patch-avpbooter.py images/AVPBooter.vmapple2.bin images/AVPBooter.patche
 scripts/prepare-aux.py images/aux.img --set 'boot-args=-v serial=3'
 
 # 5. boot
-scripts/boot-robust.sh      # or scripts/run-vm.sh to stay in the foreground
+scripts/boot-robust.sh      # or scripts/run-vm.sh to stay in the foreground, and
+                            # from a second terminal: scripts/guest.py wait &&
+                            # scripts/guest.py settime && scripts/guest.py prepare
 ```
 
 The desktop appears in the device's own Vulkan window. First boot to the login

@@ -56,16 +56,61 @@ rather than corrupted.
 ### Boot arguments
 
 There is no `-append` on this path: boot-args come from NVRAM. The aux holds two
-CHRP banks (at `0xa00000` length `0x2000`, and `0xa80000` length `0x80000`),
-each with an adler32 over `[base+0x14, base+banklen)` stored LE at `base+0x10`.
-The live one is the bank with the higher generation.
+banks of `0x80000` bytes, at `0xa00000` and `0xa80000`; the live one is the bank
+with the higher generation. Each bank is a list of CHRP partitions: a 32-byte
+`nvram` header (adler32 over `[base+0x14, base+0x80000)` stored LE at
+`base+0x10`, generation at `base+0x14`), then `common` at `+0x20` and `system`
+at `+0x60000`. On the stock image the last entry of `system` is an empty
+`boot-args=`.
 
-**Append-only works; re-serialising the entry list does not.** A rewritten list
-makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
+**Edit one entry in place; re-serialising the entry list does not work.** A
+rewritten list makes iBoot reject the NVRAM, set `iboot-failure-reason=0x65` and
 `boot-command=recover`, and loop (measured: 523 iterations of stage 1, no stage
-2). `scripts/prepare-aux.py` therefore appends one `KEY=VALUE\0` after the last
-entry and fixes only that bank's checksum — 25 bytes differ for
-`boot-args=-v serial=3`.
+2). `scripts/prepare-aux.py` therefore changes only the entry it sets, inside
+its partition, and fixes that bank's checksum. With a wrong checksum, or an
+entry written over a partition header, the guest boots without the new value.
+
+### The guest agent's Tart check
+
+Cirrus Labs' images run `tart-guest-agent` as a root LaunchDaemon. Before
+anything else it looks for `/dev/cu.tart-version-<version>`, the dummy
+virtio-console port Tart adds for such checks, and when that is missing it sends
+SIGTERM to its parent (`internal/command/root.go` in agent 0.7.0). The parent is
+launchd: it logs `System shutdown initiated by kernel - launchd got a SIGTERM`,
+shuts down in order and reboots, a couple of minutes into every boot, without
+end. `run-vm.sh` therefore adds a virtio-serial port named
+`tart-version-2.41.1` (the agent wants a Tart version, semver 2.0.0 or later);
+macOS's own virtio-console driver turns it into the device node. Measured on a
+fresh image with the aux and overlay kept across guest restarts: without the
+port, 14 restarts in 40 min, one every 150–170 s; with it, none in 10–15 min,
+in each of three runs.
+
+With the check satisfied the agent carries on as under Tart. Once, it repairs
+the disk and grows the APFS container into the space Cirrus left unpartitioned
+(to 49.9 GB, on the overlay); that took 268–318 s of guest time with the load
+average at 300–375, so leave a fresh image's first boot alone until it is done.
+A restart after it boots normally. Agent 0.7.0 then exits and launchd restarts
+it every 10 s, and its LaunchAgent retries Tart's clipboard and vsock channels
+every second. Nothing here uses the agent, so `scripts/guest.py prepare` waits
+for the daemon's first run to end, then stops both jobs and moves their plists
+aside. It waits even while the daemon is not loaded: launchd loads
+`/Library/LaunchDaemons` only after macOS's own guest agent answers (the daemon
+started 46 s later in one run), and a plist moved away before that never runs,
+which leaves the container at 44.1 GB. `boot-robust.sh` runs prepare each time
+it starts the VM; it does nothing once the jobs are gone.
+
+### macOS's own guest agent
+
+macOS ships `/usr/libexec/AppleQEMUGuestAgent`, and launchd starts it when the
+guest has a virtio-serial port named `org.qemu.guest_agent.0`. It speaks the
+QEMU guest agent protocol: `guest-exec` (as root), `guest-file-*`,
+`guest-set-time`, `guest-shutdown`, `apple-guest-set-remote-login`.
+`run-vm.sh` adds that port next to the Tart one and connects it to
+`$ROOT/qga.sock`; `scripts/guest.py` is the client. Each time `boot-robust.sh`
+starts the VM it uses it to set the guest clock from the host, because timed
+cannot store its RTC offset here and otherwise starts from a stale file
+timestamp, and to retire the Tart agent as above. The socket takes one client
+at a time, and the agent runs anything as root: treat it like the guest itself.
 
 ---
 
@@ -147,17 +192,28 @@ xnu takes its timebase from `/cpus/<cpu>/timebase-frequency` in the device tree
 `CNTFRQ_EL0` (`pexpert/arm/pe_identify_machine.c`). Apple's device tree says
 24 MHz, and iBoot does not correct it.
 
-Under TCG the counter is emulated at 24 MHz, so they agree. Under a hardware
-accelerator the guest reads the host's counter, which no hypervisor can
-rescale. So on the boot CPU's `SET_INITIAL_STATE` — before `arm_init()` reaches
-`pe_identify_machine()` — `hvc.c` rewrites every `timebase-frequency` record
-(exact name, length 8, value 24000000) in the device tree iBoot already loaded
-and verified, to the real counter rate. It does nothing when the counter is
-24 MHz.
+Under a hardware accelerator the guest reads the host's counter, which no
+hypervisor can rescale. So on the boot CPU's `SET_INITIAL_STATE` — before
+`arm_init()` reaches `pe_identify_machine()` — `hvc.c` rewrites every
+`timebase-frequency` record (exact name, length 8, value 24000000) in the device
+tree iBoot already loaded and verified, to the real counter rate. It does
+nothing when the counter is 24 MHz.
 
-Measured under TCG with the counter at 19.2 MHz, guest clock against host clock
-over 120 s: **1.0006 ± 0.003** with the rewrite (`hw.tbfrequency` 19200000),
-**0.801 ± 0.0003** without it.
+Under TCG the counter cannot run at 24 MHz: QEMU advances it once every whole
+number of nanoseconds, and 24 MHz would need 41.67 ns, so a counter set to 24
+MHz runs at 1e9/41 = 24.39 MHz, and a guest told 24 MHz gains 1.6 %. `vmapple.c`
+therefore sets it to 25 MHz, 40 ns a tick, and `hvc.c` rewrites the device tree
+to that, as above. Telling the guest 1e9/41 Hz instead does not work: xnu turns
+the rate into `mach_timebase_info`, 1e9/rate in lowest terms, and with
+1000000000/24390243 macOS's own code overflows converting a ten-minute interval
+to ticks (parsecd, systemstats and UserEventAgent died with `SIGTRAP` within
+minutes). Whatever the rate, that fraction has to stay small; 25 MHz gives 40/1.
+
+Measured under TCG, guest clock against host clock: **+1.626 %** over 300 s with
+the counter at 24 MHz and the guest told 24 MHz; at 25 MHz, within **0.0001 %**
+over 300 s and over 900 s (`hw.tbfrequency` 25000000). Earlier, with the counter
+at 19.2 MHz, over 120 s: **1.0006 ± 0.003** with the rewrite (`hw.tbfrequency`
+19200000), **0.801 ± 0.0003** without it.
 
 ### How many vCPUs
 
@@ -204,6 +260,13 @@ file mappings, so the whole-RAM import then fails with
 alias failures in the log on an anonymous-RAM host are **expected**; those maps
 take the copying rails.
 
+One change to `reims-vgpu` itself matters on NVIDIA: the window waits up to
+2 ms for a swapchain image. NVIDIA's Wayland driver reads the compositor's
+buffer releases only while an acquire is allowed to wait, so with the original
+timeout of 0 the window presented its first frames and then nothing (one boot:
+875 frames offered, 3 presented). With 2 ms every offered frame is presented.
+It is steelbrain/reims-vgpu#99, carried here until it is merged there.
+
 ---
 
 ### Where the firmware comes from, and why that matters
@@ -240,7 +303,7 @@ iBoot → XNU` to complete on TCG meant finding, one boot at a time, what the
 chain requires: the disk attached both as pflash and as virtio so `fsboot` can
 read boot objects; the image's *own* NVRAM, because the LocalPolicy is
 personalised; the image's *own* ECID passed as the machine UUID; and NVRAM
-edited append-only, because a re-serialised variable list makes iBoot set
+entries edited in place, because a re-serialised variable list makes iBoot set
 `iboot-failure-reason=0x65` and loop forever. Each of those is a measured fact
 with a failure mode attached, and none of them is documented anywhere.
 
@@ -266,9 +329,8 @@ for the first time.
 **The operating knowledge.** Which of these matter is itself a result: 10 GB of
 guest RAM because the RAMBlock must fit one Vulkan heap; plain anonymous RAM
 rather than memfd because amdgpu's userptr rejects shared file mappings; 12
-vCPUs because MTTCG's costs overtake the parallelism past that; and leaving
-guest state alone across restarts because macOS finishes its install phases
-across reboots.
+vCPUs because MTTCG's costs overtake the parallelism past that; and the Tart
+version port, because the image's guest agent restarts any guest without it.
 
 ---
 
@@ -279,7 +341,7 @@ emulation; the vmapple changes live in `hw/vmapple`.
 
 | File | What and why |
 |---|---|
-| `hw/vmapple/vmapple.c` | The `apple-vm` machine: the reims-vgpu device, CHRP NVRAM building, the GICv2m/MSI wiring newer guests need, a 24 MHz counter under TCG, and the GIC layout published as `gic-dist-base`/`gic-redist-base`/`gic-its-base` properties for WHPX. |
+| `hw/vmapple/vmapple.c` | The `apple-vm` machine: the reims-vgpu device, CHRP NVRAM building, the GICv2m/MSI wiring newer guests need, a 25 MHz counter under TCG (§2), and the GIC layout published as `gic-dist-base`/`gic-redist-base`/`gic-its-base` properties for WHPX. |
 | `hw/vmapple/hvc.c` (new) | The Apple hypercall service: PAC keys per core, the per-process key calls, and the device-tree timebase rewrite (§2). |
 | `hw/vmapple/bdif.c` | The backdoor interface: **NVRAM block writes** (upstream drops them, so the guest could never persist a boot variable), plus the virtual-USB queue lifecycle. |
 | `hw/vmapple/cfg.c` | A guest-visible 64-byte random seed at the fixed offset `0x5c8`, and `production-mode` as a property. |
@@ -357,18 +419,6 @@ project.
 These are open, measured, and not worked around. A run that hits them is
 behaving as expected for this tree.
 
-### The guest restarts a few times before it settles
-
-**Wait through 2–5 restarts on a fresh image.** macOS completes install and
-update sequences *across* reboots (installer phases, MobileSoftwareUpdate,
-firmware update) and records its progress in NVRAM and on disk. Until those
-phases are satisfied the guest keeps restarting — and it converges only if the
-state is left alone. Resetting the aux or the overlay between boots wipes the
-progress and the guest retries phase 1 forever, which looks exactly like a
-permanent reboot loop. Real hardware (and tart) persists both; so must you.
-
-A restart takes 200–340 s of guest time and is kernel-initiated and orderly.
-
 ### A GPU page-table panic
 
 Occasionally, with the desktop up, the guest panics:
@@ -416,7 +466,8 @@ refuses screenshots to non-portal clients. What works:
 For anything that is not a pixel question, use the guest itself: `run-vm.sh`
 forwards host port 2222 to the guest's SSH (`ssh -p 2222 admin@127.0.0.1`, the
 image's `admin`/`admin`). The first login after boot takes one to three minutes
-under TCG while launchd starts sshd. The forward listens on all host interfaces.
+under TCG while launchd starts sshd. The forward listens on 127.0.0.1 only;
+`SSH_ADDR=0.0.0.0` opens it to other machines, with that well-known login.
 
 ### Performance, and the KVM question
 

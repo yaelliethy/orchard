@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Boot and leave the guest alone.
 #
-# macOS finishes install/update sequences ACROSS reboots and records progress in
-# NVRAM (the aux) and on disk (the overlay). Copying frozen baselines over
-# either before a boot wipes that progress, so the guest retries phase 1 forever
-# and every session looks like a permanent reboot loop. This script therefore
-# resets nothing: expect 2-5 restarts on a fresh image, then convergence.
+# The aux holds the guest's NVRAM and the overlay its disk; copying frozen
+# baselines over either before a boot throws away what the guest wrote. This
+# script therefore resets nothing.
 #
 # It also refuses to start a second VM against the same images, because two
 # QEMUs sharing one overlay corrupt it.
@@ -33,4 +31,11 @@ rm -f "$ROOT/serial.txt"
 export RADV_DEBUG="${RADV_DEBUG:-nodcc,nohiz}"
 
 nohup "$ROOT/scripts/run-vm.sh" > "$ROOT/vm.log" 2>&1 < /dev/null &
-echo "booted; serial -> $ROOT/serial.txt, device log -> $ROOT/vm.log"
+
+# Once macOS is up, through its own guest agent: set its clock from the host
+# (it otherwise starts from a stale file timestamp), and on a Cirrus base image
+# retire tart-guest-agent. This runs once per VM start, not after a restart
+# inside the guest; both steps are idempotent.
+nohup sh -c 'g="$1/scripts/guest.py"; "$g" wait && { "$g" settime; "$g" prepare; }' \
+  sh "$ROOT" > "$ROOT/guest.log" 2>&1 < /dev/null &
+echo "booted; serial -> $ROOT/serial.txt, device log -> $ROOT/vm.log, guest setup -> $ROOT/guest.log"

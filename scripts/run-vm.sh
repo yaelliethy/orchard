@@ -32,6 +32,10 @@ RAM="${RAM:-10G}"
 # asks (SET_INITIAL_STATE); no WFE arm is needed.
 CPUS="${CPUS:-12}"
 SERIAL_LOG="${SERIAL_LOG:-$ROOT/serial.txt}"
+# Host address for the guest SSH forward (port 2222). The image logs in with
+# the well-known admin/admin, so the default keeps it off the network; set
+# SSH_ADDR=0.0.0.0 to reach the guest from another machine.
+SSH_ADDR="${SSH_ADDR:-127.0.0.1}"
 
 for f in "$QEMU" "$DISK" "$AUX" "$ROM"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
@@ -48,6 +52,15 @@ PY
 )
 fi
 [ -n "$ECID" ] || { echo "no ECID: set ECID=... (see images/config.json)" >&2; exit 1; }
+
+# The guest's shaders arrive as AIR bitcode. reims-vgpu's metal2vulkan
+# disassembles them with llvm-dis and checks the SPIR-V it makes with spirv-val;
+# without either tool every shader is refused and the window stays black.
+for t in llvm-dis spirv-val; do
+  v=METAL2VULKAN_$(tr 'a-z-' 'A-Z_' <<< "$t")
+  [ -n "${!v:-}" ] || command -v "$t" >/dev/null ||
+    echo "warning: $t not found, so the window will stay black: install LLVM and SPIRV-Tools, or set $v" >&2
+done
 
 # Guest writes go to an overlay; the tart image stays pristine and read-only.
 if [ ! -e "$OVERLAY" ]; then
@@ -75,6 +88,16 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export GDK_BACKEND="${GDK_BACKEND:-wayland}"
 
+# --- Tart's version port ----------------------------------------------------
+# Cirrus Labs' images run tart-guest-agent as a LaunchDaemon. Unless the guest
+# has /dev/cu.tart-version-<version>, the dummy virtio-console port Tart adds,
+# the agent sends SIGTERM to its parent -- launchd -- and macOS shuts down and
+# restarts a couple of minutes into every boot. Give it the port. The name must
+# carry a Tart version, semver 2.0.0 or later, not the agent's own version.
+# The same virtio-serial device carries org.qemu.guest_agent.0, for macOS's own
+# guest agent; scripts/guest.py talks to it through $ROOT/qga.sock. The agent
+# runs commands as root, so the socket is as sensitive as the guest itself.
+
 exec "$QEMU" \
   -M apple-vm,uuid="$ECID" \
   -accel tcg,thread=multi,tb-size=2048 \
@@ -86,8 +109,13 @@ exec "$QEMU" \
   -device vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on \
   -drive file="$OVERLAY",if=none,id=root,format=qcow2,cache=writeback,aio=threads,discard=unmap \
   -device vmapple-virtio-blk-pci,variant=root,drive=root \
-  -netdev user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22 \
+  -netdev user,id=net0,hostfwd=tcp:"$SSH_ADDR":2222-:22 \
   -device virtio-net-pci,netdev=net0 \
+  -chardev null,id=tartver \
+  -device virtio-serial-pci,id=vser0 \
+  -device virtserialport,bus=vser0.0,chardev=tartver,name=tart-version-2.41.1 \
+  -chardev socket,id=qga0,path="$ROOT/qga.sock",server=on,wait=off \
+  -device virtserialport,bus=vser0.0,chardev=qga0,name=org.qemu.guest_agent.0 \
   -chardev socket,id=ser0,path="$ROOT/serial.sock",server=on,wait=off,logfile="$SERIAL_LOG" \
   -serial chardev:ser0 \
   -qmp unix:"$ROOT/qmp.sock",server=on,wait=off \

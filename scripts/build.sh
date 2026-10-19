@@ -35,6 +35,14 @@ if [ ! -f build.ninja ]; then
   ../configure --target-list=aarch64-softmmu --disable-docs --enable-slirp \
                --disable-werror "$@"
 fi
+# The guest's AES engine (hw/vmapple/aes.c) works only through a crypto
+# library. Without one QEMU still builds, but refuses to start the VM.
+if ! grep -q -E '^#define CONFIG_(GNUTLS_CRYPTO|NETTLE|GCRYPT)$' config-host.h; then
+  echo "error: QEMU found no crypto library (gnutls, nettle or libgcrypt)." >&2
+  echo "Install one (Debian/Ubuntu: libgnutls28-dev, Fedora: gnutls-devel)," >&2
+  echo "then delete qemu/build and run this script again." >&2
+  exit 1
+fi
 ninja qemu-system-aarch64
 echo
 echo "built: $ROOT/qemu/build/qemu-system-aarch64"

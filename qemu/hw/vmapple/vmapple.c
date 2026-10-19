@@ -597,12 +597,13 @@ static void mach_vmapple_init(MachineState *machine)
                                 &error_fatal);
 
         /*
-         * Under TCG, emulate Apple's 24 MHz counter, the rate the guest's
-         * device tree states. Hardware accelerators expose the host's
-         * counter instead, and hw/vmapple/hvc.c corrects the device tree.
+         * Under TCG the counter ticks every gt_cntfrq_period_ns() whole
+         * nanoseconds, so Apple's 24 MHz would run at 1e9/41 Hz. 25 MHz
+         * runs exactly. hw/vmapple/hvc.c writes the rate into the guest's
+         * device tree, as it does for a hardware accelerator's counter.
          */
         if (tcg_enabled() && object_property_find(cpu, "cntfrq")) {
-            object_property_set_int(cpu, "cntfrq", 24000000, &error_fatal);
+            object_property_set_int(cpu, "cntfrq", 25000000, &error_fatal);
         }
 
         /*
@@ -712,7 +713,8 @@ static const CPUArchIdList *vmapple_possible_cpu_arch_ids(MachineState *ms)
 }
 
 static GlobalProperty vmapple_compat_defaults[] = {
-    { TYPE_VIRTIO_PCI, "disable-legacy", "on" },
+    /* Optional: transitional and non-transitional types have no such property */
+    { TYPE_VIRTIO_PCI, "disable-legacy", "on", .optional = true },
     /*
      * macOS XHCI driver attempts to schedule events onto even rings 1 & 2
      * even when (as here) there is no MSI(-X) support. Disabling interrupter
@@ -803,6 +805,13 @@ static void apple_vm_machine_class_init(ObjectClass *oc, const void *data)
     /* Parent (vmapple) class_init has already run; override only the CPU. */
     mc->default_cpu_type = TYPE_APPLE_VM_CPU;
     mc->desc = "Apple aarch64 Virtual Machine (Orchard, custom CPU)";
+
+    /*
+     * Except compat_props: machine_class_base_init() gives every concrete
+     * machine class a fresh array, so the parent's defaults are not inherited.
+     */
+    compat_props_add(mc->compat_props, vmapple_compat_defaults,
+                     G_N_ELEMENTS(vmapple_compat_defaults));
 }
 
 static const TypeInfo apple_vm_machine_info = {

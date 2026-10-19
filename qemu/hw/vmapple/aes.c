@@ -18,6 +18,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/vmapple/vmapple.h"
 #include "migration/vmstate.h"
+#include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -564,10 +565,28 @@ static void aes_init(Object *obj)
     s->as = &address_space_memory;
 }
 
+static void aes_realize(DeviceState *dev, Error **errp)
+{
+    /*
+     * Every data command goes through qcrypto. Built without gnutls, nettle
+     * or libgcrypt, the cipher is a stub that refuses all of them: the first
+     * command then never completes and macOS stops a few seconds into the
+     * kernel with every CPU idle. Refuse to start instead.
+     */
+    if (!qcrypto_cipher_supports(QCRYPTO_CIPHER_ALGO_AES_256,
+                                 QCRYPTO_CIPHER_MODE_CBC)) {
+        error_setg(errp, "%s: this QEMU was built without a crypto library; "
+                   "rebuild it with gnutls, nettle or libgcrypt",
+                   TYPE_APPLE_AES);
+    }
+}
+
 static void aes_class_init(ObjectClass *klass, const void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
+    dc->realize = aes_realize;
     rc->phases.hold = aes_reset;
 }
 
