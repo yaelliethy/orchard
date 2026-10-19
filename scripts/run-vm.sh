@@ -53,6 +53,15 @@ PY
 fi
 [ -n "$ECID" ] || { echo "no ECID: set ECID=... (see images/config.json)" >&2; exit 1; }
 
+# The guest's shaders arrive as AIR bitcode. reims-vgpu's metal2vulkan
+# disassembles them with llvm-dis and checks the SPIR-V it makes with spirv-val;
+# without either tool every shader is refused and the window stays black.
+for t in llvm-dis spirv-val; do
+  v=METAL2VULKAN_$(tr 'a-z-' 'A-Z_' <<< "$t")
+  [ -n "${!v:-}" ] || command -v "$t" >/dev/null ||
+    echo "warning: $t not found, so the window will stay black: install LLVM and SPIRV-Tools, or set $v" >&2
+done
+
 # Guest writes go to an overlay; the tart image stays pristine and read-only.
 if [ ! -e "$OVERLAY" ]; then
   qemu-img create -f qcow2 -F raw -b "$DISK" "$OVERLAY" >/dev/null
